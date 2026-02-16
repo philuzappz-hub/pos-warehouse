@@ -24,6 +24,9 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
+// must match BranchSwitcher
+const ADMIN_ACTIVE_BRANCH_NAME_KEY = "admin_active_branch_name_v1";
+
 type NavItem = {
   name: string;
   href: string;
@@ -55,8 +58,15 @@ const navigation: NavItem[] = [
   { name: "Reports", href: "/reports", icon: BarChart3, roles: ["admin"] },
 ];
 
-// must match BranchSwitcher
-const ADMIN_ACTIVE_BRANCH_NAME_KEY = "admin_active_branch_name_v1";
+function getInitials(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+  if (parts.length === 0) return "CO";
+  return parts.map((p) => p[0]?.toUpperCase()).join("");
+}
 
 export default function Sidebar() {
   const location = useLocation();
@@ -70,7 +80,7 @@ export default function Sidebar() {
     isReturnsHandler,
     branchName,
     activeBranchId,
-    companyName, // ✅ assumes you added this in useAuth
+    companyName,
   } = useAuth();
 
   // ✅ read admin branch name saved by BranchSwitcher
@@ -105,8 +115,9 @@ export default function Sidebar() {
     return location.pathname === href || location.pathname.startsWith(href + "/");
   };
 
-  // ✅ Title
-  const title = (companyName ?? "").trim() || "Company";
+  // ✅ Title (avoid flashing "Company" — show skeleton until resolved)
+  const companyDisplay = (companyName ?? "").trim();
+  const showCompanySkeleton = !companyDisplay;
 
   // ✅ Branch label under title
   const headerBranchLabel = useMemo(() => {
@@ -117,34 +128,63 @@ export default function Sidebar() {
     return branchName ?? "Not assigned";
   }, [isAdmin, activeBranchId, adminBranchNameCached, branchName]);
 
+  const showBranchSkeleton = isAdmin
+    ? !!activeBranchId && !adminBranchNameCached?.trim()
+    : branchName == null;
+
   // ✅ Admin “Viewing:” line label
   const adminViewingLabel = useMemo(() => {
     if (!activeBranchId) return "All branches";
     return adminBranchNameCached?.trim() || "Selected branch";
   }, [activeBranchId, adminBranchNameCached]);
 
+  const initials = getInitials(companyDisplay || "Company");
+
   return (
     <div className="flex h-full w-64 flex-col bg-slate-900 border-r border-slate-800">
       {/* ✅ Brand/Header */}
       <div className="px-5 py-4 border-b border-slate-800">
         <div className="flex items-center gap-3">
+          {/* icon / initials */}
           <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-emerald-500/25 to-cyan-500/10 border border-emerald-500/25 flex items-center justify-center">
-            <Building2 className="h-6 w-6 text-emerald-400" />
+            {companyDisplay ? (
+              <span className="text-[12px] font-extrabold tracking-wide text-emerald-200">
+                {initials}
+              </span>
+            ) : (
+              <Building2 className="h-6 w-6 text-emerald-400" />
+            )}
           </div>
 
-          <div className="min-w-0">
-            <div className="truncate text-lg font-extrabold tracking-tight bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent">
-              {title}
-            </div>
+          <div className="min-w-0 flex-1">
+            {/* company name */}
+            {showCompanySkeleton ? (
+              <div className="h-5 w-40 rounded bg-slate-800 animate-pulse" />
+            ) : (
+              <div
+                title={companyDisplay}
+                className="truncate text-[16px] md:text-lg font-extrabold tracking-tight bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent"
+              >
+                {companyDisplay}
+              </div>
+            )}
 
-            {/* ✅ Branch line (replaces “POS • Warehouse • Reports”) */}
+            {/* branch line */}
             <div className="mt-1 flex items-center gap-2">
               <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-200 border border-slate-700">
                 Branch
               </span>
-              <span className="text-[12px] font-medium text-slate-300 truncate">
-                {headerBranchLabel}
-              </span>
+
+              {showBranchSkeleton ? (
+                <div className="h-4 w-28 rounded bg-slate-800 animate-pulse" />
+              ) : (
+                <span
+                  title={headerBranchLabel}
+                  className="text-[12px] font-medium text-slate-300 truncate"
+                >
+                  {headerBranchLabel}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -178,13 +218,18 @@ export default function Sidebar() {
               key={item.name + item.href}
               to={item.href}
               className={cn(
-                "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-all",
                 active
-                  ? "bg-primary text-primary-foreground"
+                  ? "bg-primary/90 text-primary-foreground shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_10px_30px_rgba(0,0,0,0.25)]"
                   : "text-slate-400 hover:bg-slate-800 hover:text-white"
               )}
             >
-              <item.icon className="h-5 w-5" />
+              {/* left border indicator */}
+              {active && (
+                <span className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r bg-emerald-400" />
+              )}
+
+              <item.icon className={cn("h-5 w-5", active ? "opacity-100" : "opacity-80")} />
               {item.name}
             </Link>
           );
