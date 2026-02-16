@@ -72,14 +72,14 @@ interface AuthContextType {
 
   repairMissingCompanyId: () => Promise<{ error: Error | null; repaired?: number }>;
 
-  // ✅ NEW: move sensitive updates to Edge (admins only)
+  // ✅ move sensitive updates to Edge (admins only)
   updateEmployeeRoleBranch: (
     userId: string,
     role: AppRole,
     branchId: string
   ) => Promise<{ error: Error | null; ok?: boolean }>;
 
-  // ✅ NEW: protect permission toggles too (optional but recommended)
+  // ✅ protect permission toggles too
   setEmployeeFlag: (
     userId: string,
     field: "is_attendance_manager" | "is_returns_handler",
@@ -92,6 +92,11 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const ADMIN_ACTIVE_BRANCH_KEY = "admin_active_branch_id";
 const LOADING_WATCHDOG_MS = 8000;
 const FETCH_TIMEOUT_MS = 6500;
+
+// ✅ NEW: profile cache + retries to prevent “refresh looks like logout”
+const PROFILE_CACHE_KEY = "cached_profile_v1";
+const PROFILE_CACHE_USER_KEY = "cached_profile_user_id_v1";
+const PROFILE_FETCH_RETRIES = 3;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let t: number | undefined;
@@ -230,6 +235,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else safeSetActiveBranch(null);
   };
 
+  // ✅ NEW: profile cache helpers
+  const readCachedProfile = (userId: string): Profile | null => {
+    try {
+      const cachedUserId = localStorage.getItem(PROFILE_CACHE_USER_KEY);
+      if (cachedUserId !== userId) return null;
+
+      const raw = localStorage.getItem(PROFILE_CACHE_KEY);
+      if (!raw) return null;
+
+      return JSON.parse(raw) as Profile;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeCachedProfile = (userId: string, p: any) => {
+    try {
+      localStorage.setItem(PROFILE_CACHE_USER_KEY, userId);
+      localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(p));
+    } catch {
+      // ignore
+    }
+  };
+
+  const clearCachedProfile = () => {
+    try {
+      localStorage.removeItem(PROFILE_CACHE_USER_KEY);
+      localStorage.removeItem(PROFILE_CACHE_KEY);
+    } catch {
+      // ignore
+    }
+  };
+
   const buildFallbackProfile = (userId: string): Profile => {
     const fullNameFromMeta =
       (user as any)?.user_metadata?.full_name ??
@@ -299,49 +337,80 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // ✅ NEW: retry logic for profile fetch (reduces false “pending access” on refresh)
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const fetchProfileWithRetry = async (userId: string) => {
+    let lastErr: any = null;
+
+    for (let attempt = 1; attempt <= PROFILE_FETCH_RETRIES; attempt++) {
+      try {
+        const queryPromise = Promise.resolve(
+          supabase
+            .from("profiles")
+            .select(
+              `
+              id,
+              user_id,
+              full_name,
+              phone,
+              role,
+              is_admin,
+              company_id,
+              branch_id,
+              avatar_url,
+              staff_code,
+              is_attendance_manager,
+              is_returns_handler,
+              created_at,
+              updated_at,
+              deleted_at,
+              deleted_by,
+              deleted_reason
+            `
+            )
+            .eq("user_id", userId)
+            .maybeSingle()
+        );
+
+        const { data, error } = await withTimeout(
+          queryPromise,
+          12000,
+          `fetchUserData(profiles) attempt ${attempt}`
+        );
+
+        if (error) throw error;
+        return data;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < PROFILE_FETCH_RETRIES) await sleep(300 * attempt);
+      }
+    }
+
+    throw lastErr;
+  };
+
   const fetchUserData = async (userId: string) => {
     const mySeq = ++fetchSeq.current;
 
+    // ✅ hydrate from cache immediately
+    const cached = readCachedProfile(userId);
+    if (cached) {
+      applyProfileState(cached);
+      fetchBranchName((cached as any)?.branch_id ?? null).catch(() => {});
+    }
+
     try {
-      const queryPromise = Promise.resolve(
-        supabase
-          .from("profiles")
-          .select(
-            `
-            id,
-            user_id,
-            full_name,
-            phone,
-            role,
-            is_admin,
-            company_id,
-            branch_id,
-            avatar_url,
-            staff_code,
-            is_attendance_manager,
-            is_returns_handler,
-            created_at,
-            updated_at,
-            deleted_at,
-            deleted_by,
-            deleted_reason
-          `
-          )
-          .eq("user_id", userId)
-          .maybeSingle()
-      );
+      const data = await fetchProfileWithRetry(userId);
 
-      const { data, error } = await withTimeout(
-        queryPromise,
-        FETCH_TIMEOUT_MS,
-        "fetchUserData(profiles)"
-      );
-
-      if (error) throw error;
       if (mySeq !== fetchSeq.current) return null;
 
       if (!data) {
         await ensureProfileRowExists(userId);
+
+        // ✅ if cache exists, do NOT overwrite with fallback
+        if (cached) return cached;
+
         const fallback = buildFallbackProfile(userId);
         applyProfileState(fallback);
         safeSetBranchName(null);
@@ -359,15 +428,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeSetRoles([]);
         safeSetActiveBranch(null);
         safeSetBranchName(null);
+        clearCachedProfile();
 
         return null;
       }
 
       applyProfileState(data);
+      writeCachedProfile(userId, data);
       fetchBranchName((data as any)?.branch_id ?? null).catch(() => {});
       return data as unknown as Profile | null;
     } catch (err) {
       console.error("[useAuth] Error fetching user data:", err);
+
+      // ✅ if we have cache, keep working (prevents “refresh logs me out”)
+      if (cached) return cached;
 
       if (mySeq === fetchSeq.current) {
         const fallback = buildFallbackProfile(userId);
@@ -417,6 +491,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeSetRoles([]);
         safeSetActiveBranch(null);
         safeSetBranchName(null);
+        clearCachedProfile();
         safeSetLoading(false);
         stopWatchdog();
       }
@@ -534,7 +609,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ Clean, production-safe Edge caller (NO extra brittle JWT parsing)
+  // ✅ Clean, production-safe Edge caller
   const callEdge = async <T,>(
     slug: string,
     body: unknown,
@@ -635,7 +710,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ NEW: Admin-only role+branch update (do NOT update profiles directly from client)
   const updateEmployeeRoleBranch: AuthContextType["updateEmployeeRoleBranch"] = async (
     userId,
     role,
@@ -658,7 +732,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ NEW: Admin-only permission flags update
   const setEmployeeFlag: AuthContextType["setEmployeeFlag"] = async (userId, field, value) => {
     try {
       if (!userId) return { error: new Error("Missing userId") };
@@ -676,6 +749,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
+    // ✅ clear cached profile so next login is clean
+    clearCachedProfile();
     await supabase.auth.signOut();
   };
 
