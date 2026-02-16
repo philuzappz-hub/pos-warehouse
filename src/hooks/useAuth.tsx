@@ -24,6 +24,9 @@ interface AuthContextType {
   profile: Profile | null;
   roles: AppRole[];
 
+  // ✅ NEW: company name for UI branding
+  companyName: string | null;
+
   branchId: string | null;
   branchName: string | null;
   activeBranchId: string | null;
@@ -93,7 +96,7 @@ const ADMIN_ACTIVE_BRANCH_KEY = "admin_active_branch_id";
 const LOADING_WATCHDOG_MS = 8000;
 const FETCH_TIMEOUT_MS = 6500;
 
-// ✅ NEW: profile cache + retries to prevent “refresh looks like logout”
+// ✅ profile cache + retries to prevent “refresh looks like logout”
 const PROFILE_CACHE_KEY = "cached_profile_v1";
 const PROFILE_CACHE_USER_KEY = "cached_profile_user_id_v1";
 const PROFILE_FETCH_RETRIES = 3;
@@ -166,6 +169,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const [branchNameState, setBranchNameState] = useState<string | null>(null);
 
+  // ✅ NEW: company name state
+  const [companyName, setCompanyName] = useState<string | null>(null);
+
   const fetchSeq = useRef(0);
   const mountedRef = useRef(true);
   const lastFetchedUserIdRef = useRef<string | null>(null);
@@ -190,6 +196,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const safeSetLoading = (v: boolean) => mountedRef.current && setLoading(v);
   const safeSetUser = (u: User | null) => mountedRef.current && setUser(u);
   const safeSetSession = (s: Session | null) => mountedRef.current && setSession(s);
+
+  const safeSetCompanyName = (n: string | null) =>
+    mountedRef.current && setCompanyName(n);
 
   const branchId = (profile as any)?.branch_id ?? null;
   const branchName = branchNameState;
@@ -235,7 +244,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else safeSetActiveBranch(null);
   };
 
-  // ✅ NEW: profile cache helpers
+  // ✅ profile cache helpers
   const readCachedProfile = (userId: string): Profile | null => {
     try {
       const cachedUserId = localStorage.getItem(PROFILE_CACHE_USER_KEY);
@@ -317,6 +326,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // ✅ NEW: fetch company name by company_id
+  const fetchCompanyName = async (cId: string | null) => {
+    if (!cId) {
+      safeSetCompanyName(null);
+      return;
+    }
+
+    try {
+      const queryPromise = Promise.resolve(
+        supabase.from("companies").select("name").eq("id", cId).maybeSingle()
+      );
+
+      const { data, error } = await withTimeout(queryPromise, 3500, "fetchCompanyName");
+      if (error) throw error;
+
+      safeSetCompanyName((data as any)?.name ?? null);
+    } catch (e) {
+      console.warn("[useAuth] company name fetch failed:", e);
+      safeSetCompanyName(null);
+    }
+  };
+
   const ensureProfileRowExists = async (userId: string) => {
     try {
       const metaFullName =
@@ -337,7 +368,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ NEW: retry logic for profile fetch (reduces false “pending access” on refresh)
+  // ✅ retry logic for profile fetch (reduces false “pending access” on refresh)
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   const fetchProfileWithRetry = async (userId: string) => {
@@ -398,6 +429,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (cached) {
       applyProfileState(cached);
       fetchBranchName((cached as any)?.branch_id ?? null).catch(() => {});
+      fetchCompanyName((cached as any)?.company_id ?? null).catch(() => {});
     }
 
     try {
@@ -414,6 +446,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const fallback = buildFallbackProfile(userId);
         applyProfileState(fallback);
         safeSetBranchName(null);
+        safeSetCompanyName(null);
         return fallback;
       }
 
@@ -428,6 +461,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeSetRoles([]);
         safeSetActiveBranch(null);
         safeSetBranchName(null);
+        safeSetCompanyName(null);
         clearCachedProfile();
 
         return null;
@@ -436,6 +470,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       applyProfileState(data);
       writeCachedProfile(userId, data);
       fetchBranchName((data as any)?.branch_id ?? null).catch(() => {});
+      fetchCompanyName((data as any)?.company_id ?? null).catch(() => {});
       return data as unknown as Profile | null;
     } catch (err) {
       console.error("[useAuth] Error fetching user data:", err);
@@ -447,6 +482,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const fallback = buildFallbackProfile(userId);
         applyProfileState(fallback);
         safeSetBranchName(null);
+        safeSetCompanyName(null);
       }
       return buildFallbackProfile(userId);
     } finally {
@@ -491,6 +527,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeSetRoles([]);
         safeSetActiveBranch(null);
         safeSetBranchName(null);
+        safeSetCompanyName(null);
         clearCachedProfile();
         safeSetLoading(false);
         stopWatchdog();
@@ -749,8 +786,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
-    // ✅ clear cached profile so next login is clean
     clearCachedProfile();
+    safeSetCompanyName(null);
     await supabase.auth.signOut();
   };
 
@@ -764,6 +801,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         session,
         profile,
         roles,
+
+        companyName,
 
         branchId,
         branchName,
