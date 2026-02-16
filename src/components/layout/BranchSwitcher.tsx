@@ -24,37 +24,39 @@ export function BranchSwitcher() {
 
   const companyId = (profile as any)?.company_id ?? null;
 
-  // ✅ Load branches (SCOPED to company)
+  // ✅ Load branches (scoped to company)
   useEffect(() => {
     if (!isAdmin) return;
 
     let cancelled = false;
 
     const loadBranches = async () => {
-      if (!companyId) {
-        setBranches([]);
-        return;
-      }
-
       setLoading(true);
 
-      const { data, error } = await supabase
-        .from("branches")
-        .select("id, name")
-        .eq("company_id", companyId as any)
-        .eq("is_active", true)
-        .order("name");
+      try {
+        if (!companyId) {
+          if (!cancelled) setBranches([]);
+          return;
+        }
 
-      if (cancelled) return;
+        const { data, error } = await supabase
+          .from("branches")
+          .select("id, name")
+          .eq("company_id", companyId as any)
+          .eq("is_active", true)
+          .order("name");
 
-      if (error) {
-        console.error("[BranchSwitcher] Error loading branches:", error.message);
-        setBranches([]);
-      } else {
-        setBranches((data ?? []) as Branch[]);
+        if (cancelled) return;
+
+        if (error) {
+          console.error("[BranchSwitcher] Error loading branches:", error.message);
+          setBranches([]);
+        } else {
+          setBranches((data ?? []) as Branch[]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-
-      setLoading(false);
     };
 
     void loadBranches();
@@ -64,23 +66,19 @@ export function BranchSwitcher() {
     };
   }, [isAdmin, companyId]);
 
-  // ✅ Keep selected branch name in localStorage (so Sidebar can show it instantly)
+  // ✅ If company changes, reset admin view to All branches + clear cached name
   useEffect(() => {
     if (!isAdmin) return;
-
+    setActiveBranchId(null);
     try {
-      if (!activeBranchId) {
-        localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
-        return;
-      }
-
-      const name = branches.find((b) => b.id === activeBranchId)?.name;
-      if (name) localStorage.setItem(ADMIN_ACTIVE_BRANCH_NAME_KEY, name);
+      localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
     } catch {
       // ignore
     }
-  }, [isAdmin, activeBranchId, branches]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId]);
 
+  // ✅ Selected label shown in the dropdown trigger
   const selectedLabel = useMemo(() => {
     if (!activeBranchId) return "All branches";
     return branches.find((b) => b.id === activeBranchId)?.name ?? "Selected branch";
@@ -88,17 +86,32 @@ export function BranchSwitcher() {
 
   if (!isAdmin) return null;
 
+  const handleChange = (value: string) => {
+    const nextId = value === "all" ? null : value;
+
+    // update state
+    setActiveBranchId(nextId);
+
+    // persist name for Sidebar
+    try {
+      if (!nextId) {
+        localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+      } else {
+        const name = branches.find((b) => b.id === nextId)?.name;
+        if (name) localStorage.setItem(ADMIN_ACTIVE_BRANCH_NAME_KEY, name);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   return (
     <div className="px-4 py-3">
       <label className="mb-1 block text-[11px] font-medium text-slate-400">
         Active Branch
       </label>
 
-      <Select
-        value={activeBranchId ?? "all"}
-        onValueChange={(value) => setActiveBranchId(value === "all" ? null : value)}
-        disabled={loading}
-      >
+      <Select value={activeBranchId ?? "all"} onValueChange={handleChange} disabled={loading}>
         <SelectTrigger className="h-9 bg-slate-900 border-slate-700 text-slate-100">
           <SelectValue placeholder={selectedLabel} />
         </SelectTrigger>
