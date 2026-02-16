@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { BranchSwitcher } from "./BranchSwitcher";
 
@@ -20,6 +21,7 @@ import {
   Users,
   Warehouse as WarehouseIcon,
 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 type NavItem = {
@@ -140,6 +142,52 @@ export default function Sidebar() {
     activeBranchId,
   } = useAuth();
 
+  /* ------------------ ✅ Dynamic Company Name ------------------ */
+
+  const companyId = useMemo(() => (profile as any)?.company_id ?? null, [profile]);
+
+  const [companyName, setCompanyName] = useState<string | null>(null);
+  const [loadingCompany, setLoadingCompany] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadCompany = async () => {
+      if (!companyId) {
+        if (mounted) setCompanyName(null);
+        return;
+      }
+
+      setLoadingCompany(true);
+      try {
+        const { data, error } = await supabase
+          .from("companies")
+          .select("name")
+          .eq("id", companyId)
+          .maybeSingle();
+
+        if (error) throw error;
+
+        if (!mounted) return;
+        setCompanyName((data as any)?.name ?? null);
+      } catch (e) {
+        if (mounted) setCompanyName(null);
+      } finally {
+        if (mounted) setLoadingCompany(false);
+      }
+    };
+
+    loadCompany();
+
+    return () => {
+      mounted = false;
+    };
+  }, [companyId]);
+
+  const brandTitle = loadingCompany ? "Loading..." : companyName ?? "BuildMat Pro";
+
+  /* ------------------------------------------------------------ */
+
   const filteredNav = navigation.filter((item) => {
     // ✅ Attendance manager can access attendance
     if (item.allowAttendanceManager && isAttendanceManager) return true;
@@ -153,16 +201,25 @@ export default function Sidebar() {
 
   const isActivePath = (href: string) => {
     if (href === "/") return location.pathname === "/";
-    return (
-      location.pathname === href || location.pathname.startsWith(href + "/")
-    );
+    return location.pathname === href || location.pathname.startsWith(href + "/");
   };
 
   return (
     <div className="flex h-full w-64 flex-col bg-slate-900 border-r border-slate-800">
-      <div className="flex h-16 items-center gap-2 px-6 border-b border-slate-800">
+      {/* ✅ Brand Header */}
+      <div className="flex h-16 items-center gap-3 px-6 border-b border-slate-800">
         <Building2 className="h-8 w-8 text-primary" />
-        <span className="font-bold text-lg text-white">BuildMat Pro</span>
+
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-primary" />
+            <span className="font-bold text-lg text-white truncate">{brandTitle}</span>
+          </div>
+
+          <p className="text-[11px] text-slate-400 leading-tight">
+            POS • Warehouse • Reports
+          </p>
+        </div>
       </div>
 
       {/* ✅ Admin-only branch switcher (controls what admin is viewing) */}
@@ -184,9 +241,7 @@ export default function Sidebar() {
       {!isAdmin && (
         <div className="border-b border-slate-800 px-3 py-3">
           <p className="text-[11px] text-slate-400">Your Branch</p>
-          <p className="text-sm text-slate-200 truncate">
-            {branchName ?? "Not assigned"}
-          </p>
+          <p className="text-sm text-slate-200 truncate">{branchName ?? "Not assigned"}</p>
         </div>
       )}
 
