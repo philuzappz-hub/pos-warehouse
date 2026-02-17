@@ -1,46 +1,46 @@
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-    Dialog,
-    DialogContent,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
-} from '@/components/ui/table';
-import { useToast } from '@/hooks/use-toast';
-import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/integrations/supabase/client';
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import {
-    CheckCircle,
-    ChevronDown,
-    ChevronLeft,
-    ChevronRight,
-    ChevronUp,
-    Clock,
-    ExternalLink,
-    FileText,
-    Image as ImageIcon,
-    RefreshCw,
-    XCircle,
-} from 'lucide-react';
-import { Fragment, useEffect, useMemo, useState } from 'react';
+  CheckCircle,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Clock,
+  ExternalLink,
+  FileText,
+  Image as ImageIcon,
+  RefreshCw,
+  XCircle,
+} from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 // PDF
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
-type ReceiptStatus = 'pending' | 'approved' | 'rejected';
+type ReceiptStatus = "pending" | "approved" | "rejected";
 
 type ProductMini = {
   id: string;
@@ -66,6 +66,9 @@ type ReceiptRow = {
   created_at: string;
   created_by: string;
 
+  // ✅ branch scope
+  branch_id?: string | null;
+
   approved_at?: string | null;
   approved_by?: string | null;
   rejected_at?: string | null;
@@ -89,22 +92,24 @@ type AuditRow = {
   created_at: string;
 };
 
+type BranchMini = { id: string; name: string };
+
 function fmtDate(d?: string | null) {
-  if (!d) return '-';
+  if (!d) return "-";
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return String(d);
   return dt.toLocaleString();
 }
 
 function safeUpper(v?: string | null) {
-  return (v || '').toString().toUpperCase();
+  return (v || "").toString().toUpperCase();
 }
 
 function forceDownloadPdf(doc: jsPDF, filename: string) {
-  const blob = doc.output('blob');
+  const blob = doc.output("blob");
   const url = URL.createObjectURL(blob);
 
-  const a = document.createElement('a');
+  const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
@@ -119,33 +124,33 @@ function normalizeWaybillUrls(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
 
-  if (typeof v === 'object') {
+  if (typeof v === "object") {
     if (Array.isArray(v.urls)) return v.urls.filter(Boolean).map(String);
     if (Array.isArray(v.files)) return v.files.filter(Boolean).map(String);
   }
 
-  if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
   return [];
 }
 
 /**
  * ✅ createSignedUrl expects bucket-relative PATH (not full URL)
- * We store paths in ReceivedStock like: `${receiptId}/${user.id}/...jpg`
- * If older data stored full URL, this tries best to extract path.
+ * We store paths like: `${receiptId}/${user.id}/...jpg`
+ * If older data stored full URL, try extracting best effort.
  */
 function extractWaybillPath(urlOrPath: string): string {
-  const s = (urlOrPath || '').trim();
-  if (!s) return '';
-  if (!s.startsWith('http')) return s;
+  const s = (urlOrPath || "").trim();
+  if (!s) return "";
+  if (!s.startsWith("http")) return s;
 
-  const idx = s.toLowerCase().indexOf('/waybills/');
-  if (idx >= 0) return s.slice(idx + '/waybills/'.length);
+  const idx = s.toLowerCase().indexOf("/waybills/");
+  if (idx >= 0) return s.slice(idx + "/waybills/".length);
 
-  const idx2 = s.toLowerCase().indexOf('/object/');
+  const idx2 = s.toLowerCase().indexOf("/object/");
   if (idx2 >= 0) {
-    const after = s.slice(idx2 + '/object/'.length);
+    const after = s.slice(idx2 + "/object/".length);
     const lower = after.toLowerCase();
-    const b = 'waybills/';
+    const b = "waybills/";
     const bIdx = lower.indexOf(b);
     if (bIdx >= 0) return after.slice(bIdx + b.length);
   }
@@ -156,21 +161,27 @@ function extractWaybillPath(urlOrPath: string): string {
 function isLikelyImageUrl(url?: string | null) {
   if (!url) return false;
   const u = url.toLowerCase();
-  return u.includes('.png') || u.includes('.jpg') || u.includes('.jpeg') || u.includes('.webp') || u.includes('image');
+  return (
+    u.includes(".png") ||
+    u.includes(".jpg") ||
+    u.includes(".jpeg") ||
+    u.includes(".webp") ||
+    u.includes("image")
+  );
 }
 
 async function imageUrlToDataUrl(
   url: string
-): Promise<{ dataUrl: string; format: 'PNG' | 'JPEG' } | null> {
+): Promise<{ dataUrl: string; format: "PNG" | "JPEG" } | null> {
   try {
-    const res = await fetch(url, { mode: 'cors' });
+    const res = await fetch(url, { mode: "cors" });
     if (!res.ok) return null;
 
     const blob = await res.blob();
-    const mime = (blob.type || '').toLowerCase();
+    const mime = (blob.type || "").toLowerCase();
 
-    const format: 'PNG' | 'JPEG' =
-      mime.includes('png') || url.toLowerCase().includes('.png') ? 'PNG' : 'JPEG';
+    const format: "PNG" | "JPEG" =
+      mime.includes("png") || url.toLowerCase().includes(".png") ? "PNG" : "JPEG";
 
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -186,7 +197,9 @@ async function imageUrlToDataUrl(
 }
 
 // ✅ get real image dimensions (for correct scaling in PDF)
-async function getImageNaturalSize(dataUrl: string): Promise<{ w: number; h: number } | null> {
+async function getImageNaturalSize(
+  dataUrl: string
+): Promise<{ w: number; h: number } | null> {
   try {
     const img = new Image();
     await new Promise<void>((resolve, reject) => {
@@ -216,16 +229,24 @@ function fitIntoBox(
 
 export default function StockApprovals() {
   const { toast } = useToast();
-  const { user } = useAuth(); // route admin-only; DB RLS also enforces
+
+  // ✅ get selected branch context
+  const { user, isAdmin, activeBranchId, profile } = useAuth();
+
+  // ✅ TS deep-instantiation safety
+  const sb = supabase as any;
 
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<ReceiptStatus>('pending');
-  const [search, setSearch] = useState('');
+  const [tab, setTab] = useState<ReceiptStatus>("pending");
+  const [search, setSearch] = useState("");
   const [receipts, setReceipts] = useState<ReceiptRow[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   // name maps
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
+
+  // ✅ branch name map (for All branches view + PDF)
+  const [branchNameMap, setBranchNameMap] = useState<Map<string, string>>(new Map());
 
   // audit map
   const [auditMap, setAuditMap] = useState<Map<string, AuditRow[]>>(new Map());
@@ -233,14 +254,16 @@ export default function StockApprovals() {
   // reject dialog
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
-  const [rejectReason, setRejectReason] = useState('');
+  const [rejectReason, setRejectReason] = useState("");
 
   // per-receipt processing state
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
 
   // ✅ Waybill viewer dialog (private bucket signed URLs + carousel)
   const [waybillOpen, setWaybillOpen] = useState(false);
-  const [waybillActiveReceiptId, setWaybillActiveReceiptId] = useState<string | null>(null);
+  const [waybillActiveReceiptId, setWaybillActiveReceiptId] = useState<string | null>(
+    null
+  );
   const [waybillActiveUrls, setWaybillActiveUrls] = useState<string[]>([]);
   const [waybillActiveIndex, setWaybillActiveIndex] = useState(0);
   const [waybillSigning, setWaybillSigning] = useState(false);
@@ -256,7 +279,7 @@ export default function StockApprovals() {
   const openWaybillsForReceipt = async (r: ReceiptRow, startIndex = 0) => {
     const raw = normalizeWaybillUrls(r.waybill_urls);
     if (raw.length === 0) {
-      toast({ title: 'No waybill', description: 'This receipt has no waybill attached.' });
+      toast({ title: "No waybill", description: "This receipt has no waybill attached." });
       return;
     }
 
@@ -271,18 +294,20 @@ export default function StockApprovals() {
 
       for (const u of raw) {
         const path = extractWaybillPath(u);
-        if (!path || path.startsWith('http')) continue;
+        if (!path || path.startsWith("http")) continue;
 
-        const { data, error } = await supabase.storage.from('waybills').createSignedUrl(path, 3600);
+        const { data, error } = await supabase.storage
+          .from("waybills")
+          .createSignedUrl(path, 3600);
         if (!error && data?.signedUrl) signed.push(data.signedUrl);
       }
 
       if (signed.length === 0) {
         toast({
-          title: 'Waybill not accessible',
+          title: "Waybill not accessible",
           description:
             'Could not create signed URLs. Make sure waybill_urls stores storage paths like "receiptId/userId/file.jpg".',
-          variant: 'destructive',
+          variant: "destructive",
         });
         closeWaybill();
         return;
@@ -292,9 +317,9 @@ export default function StockApprovals() {
       setWaybillActiveIndex((prev) => Math.max(0, Math.min(prev, signed.length - 1)));
     } catch (e: any) {
       toast({
-        title: 'Waybill error',
-        description: e?.message || 'Could not open waybill preview',
-        variant: 'destructive',
+        title: "Waybill error",
+        description: e?.message || "Could not open waybill preview",
+        variant: "destructive",
       });
       closeWaybill();
     } finally {
@@ -302,12 +327,51 @@ export default function StockApprovals() {
     }
   };
 
+  // ✅ helper: get branch label
+  const getBranchLabel = (branchId?: string | null) => {
+    if (!branchId) return "—";
+    return branchNameMap.get(branchId) || branchId;
+  };
+
+  const fetchBranchNamesForReceipts = async (rows: ReceiptRow[]) => {
+    try {
+      // Only needed in admin "All branches" mode
+      if (!isAdmin) return;
+
+      const ids = Array.from(
+        new Set(rows.map((r) => r.branch_id).filter(Boolean) as string[])
+      );
+
+      if (ids.length === 0) {
+        setBranchNameMap(new Map());
+        return;
+      }
+
+      // If you have company_id, optionally scope by company
+      const companyId = (profile as any)?.company_id ?? null;
+
+      let q = sb.from("branches").select("id,name").in("id", ids);
+      if (companyId) q = q.eq("company_id", companyId);
+
+      const { data, error } = await q;
+      if (error) throw error;
+
+      const m = new Map<string, string>();
+      (data as BranchMini[] | null)?.forEach((b) => m.set(b.id, b.name));
+      setBranchNameMap(m);
+    } catch {
+      // non-blocking
+      setBranchNameMap(new Map());
+    }
+  };
+
   const fetchReceipts = async () => {
     setLoading(true);
 
     try {
-      const { data, error } = await supabase
-        .from('warehouse_receipts' as any)
+      // ✅ Base query
+      let q = sb
+        .from("warehouse_receipts")
         .select(
           `
             id,
@@ -316,6 +380,7 @@ export default function StockApprovals() {
             status,
             created_at,
             created_by,
+            branch_id,
             approved_at,
             approved_by,
             rejected_at,
@@ -337,14 +402,28 @@ export default function StockApprovals() {
             )
           `
         )
-        .eq('status', tab)
-        .order('created_at', { ascending: false });
+        .eq("status", tab)
+        .order("created_at", { ascending: false });
 
+      // ✅ Branch filter for admin when a branch is selected
+      if (isAdmin && activeBranchId) {
+        q = q.eq("branch_id", activeBranchId);
+      }
+
+      const { data, error } = await q;
       if (error) throw error;
 
-      const rows = (data ?? []) as unknown as ReceiptRow[];
+      const rows = (data ?? []) as ReceiptRow[];
       setReceipts(rows);
 
+      // ✅ If admin is viewing ALL branches, load branch names so we can show them
+      if (isAdmin && !activeBranchId) {
+        fetchBranchNamesForReceipts(rows).catch(() => {});
+      } else {
+        setBranchNameMap(new Map());
+      }
+
+      // ✅ user name mapping
       const ids = new Set<string>();
       rows.forEach((r) => {
         if (r.created_by) ids.add(r.created_by);
@@ -353,14 +432,14 @@ export default function StockApprovals() {
       });
 
       if (ids.size > 0) {
-        const { data: profiles, error: pErr } = await supabase
-          .from('profiles')
-          .select('user_id, full_name')
-          .in('user_id', Array.from(ids));
+        const { data: profiles, error: pErr } = await sb
+          .from("profiles")
+          .select("user_id, full_name")
+          .in("user_id", Array.from(ids));
 
         if (!pErr && profiles) {
           const m = new Map<string, string>();
-          profiles.forEach((p) => m.set(p.user_id, p.full_name));
+          (profiles as any[]).forEach((p) => m.set(p.user_id, p.full_name));
           setUserNameMap(m);
         } else {
           setUserNameMap(new Map());
@@ -370,12 +449,13 @@ export default function StockApprovals() {
       }
     } catch (e: any) {
       toast({
-        title: 'Error',
-        description: e?.message || 'Failed to load approvals',
-        variant: 'destructive',
+        title: "Error",
+        description: e?.message || "Failed to load approvals",
+        variant: "destructive",
       });
       setReceipts([]);
       setUserNameMap(new Map());
+      setBranchNameMap(new Map());
     } finally {
       setLoading(false);
     }
@@ -383,15 +463,15 @@ export default function StockApprovals() {
 
   const fetchAuditForReceipt = async (receiptId: string) => {
     try {
-      const { data, error } = await supabase
-        .from('warehouse_receipt_audit' as any)
-        .select('id, receipt_id, action, from_status, to_status, actor_id, note, created_at')
-        .eq('receipt_id', receiptId)
-        .order('created_at', { ascending: false });
+      const { data, error } = await sb
+        .from("warehouse_receipt_audit")
+        .select("id, receipt_id, action, from_status, to_status, actor_id, note, created_at")
+        .eq("receipt_id", receiptId)
+        .order("created_at", { ascending: false });
 
       if (error) throw error;
 
-      const rows = (data ?? []) as unknown as AuditRow[];
+      const rows = (data ?? []) as AuditRow[];
       setAuditMap((prev) => {
         const next = new Map(prev);
         next.set(receiptId, rows);
@@ -404,15 +484,15 @@ export default function StockApprovals() {
 
       const missing = Array.from(actorIds).filter((id) => !userNameMap.has(id));
       if (missing.length > 0) {
-        const { data: profiles } = await supabase
-          .from('profiles')
-          .select('user_id, full_name')
-          .in('user_id', missing);
+        const { data: profiles } = await sb
+          .from("profiles")
+          .select("user_id, full_name")
+          .in("user_id", missing);
 
         if (profiles && profiles.length > 0) {
           setUserNameMap((prev) => {
             const next = new Map(prev);
-            profiles.forEach((p) => next.set(p.user_id, p.full_name));
+            (profiles as any[]).forEach((p) => next.set(p.user_id, p.full_name));
             return next;
           });
         }
@@ -425,27 +505,27 @@ export default function StockApprovals() {
   useEffect(() => {
     fetchReceipts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, activeBranchId]);
 
-  // realtime refresh
+  // realtime refresh (still ok; always refetch respecting branch filter)
   useEffect(() => {
     const ch1 = supabase
-      .channel('admin-warehouse-receipts-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_receipts' }, () =>
+      .channel("admin-warehouse-receipts-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "warehouse_receipts" }, () =>
         fetchReceipts()
       )
       .subscribe();
 
     const ch2 = supabase
-      .channel('admin-warehouse-receipt-items-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_receipt_items' }, () =>
+      .channel("admin-warehouse-receipt-items-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "warehouse_receipt_items" }, () =>
         fetchReceipts()
       )
       .subscribe();
 
     const ch3 = supabase
-      .channel('admin-warehouse-receipt-audit-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_receipt_audit' }, (payload) => {
+      .channel("admin-warehouse-receipt-audit-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "warehouse_receipt_audit" }, (payload) => {
         const rid = (payload?.new as any)?.receipt_id;
         if (rid) fetchAuditForReceipt(rid);
       })
@@ -457,7 +537,7 @@ export default function StockApprovals() {
       supabase.removeChannel(ch3);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, activeBranchId]);
 
   const toggleExpand = (id: string) => {
     const willOpen = !expanded.has(id);
@@ -477,18 +557,26 @@ export default function StockApprovals() {
     if (!s) return receipts;
 
     return receipts.filter((r) => {
-      const car = (r.car_number || '').toLowerCase();
-      const notes = (r.notes || '').toLowerCase();
-      const creator = (userNameMap.get(r.created_by) || '').toLowerCase();
+      const car = (r.car_number || "").toLowerCase();
+      const notes = (r.notes || "").toLowerCase();
+      const creator = (userNameMap.get(r.created_by) || "").toLowerCase();
+      const branchText = (getBranchLabel(r.branch_id) || "").toLowerCase();
       const itemsText =
         (r.items || [])
-          .map((it) => it.product?.name || '')
-          .join(' ')
-          .toLowerCase() || '';
+          .map((it) => it.product?.name || "")
+          .join(" ")
+          .toLowerCase() || "";
 
-      return car.includes(s) || notes.includes(s) || creator.includes(s) || itemsText.includes(s);
+      return (
+        car.includes(s) ||
+        notes.includes(s) ||
+        creator.includes(s) ||
+        itemsText.includes(s) ||
+        branchText.includes(s)
+      );
     });
-  }, [receipts, search, userNameMap]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receipts, search, userNameMap, branchNameMap]);
 
   const totals = useMemo(() => {
     const receiptCount = filtered.length;
@@ -514,30 +602,30 @@ export default function StockApprovals() {
 
     setProcessing(receiptId, true);
     try {
-      const { error } = await supabase
-        .from('warehouse_receipts' as any)
+      const { error } = await sb
+        .from("warehouse_receipts")
         .update({
-          status: 'approved',
+          status: "approved",
           approved_by: user.id,
           approved_at: new Date().toISOString(),
         })
-        .eq('id', receiptId)
-        .eq('status', 'pending');
+        .eq("id", receiptId)
+        .eq("status", "pending");
 
       if (error) throw error;
 
       toast({
-        title: 'Approved ✅',
-        description: 'Receipt approved. Stock should increase automatically (trigger).',
+        title: "Approved ✅",
+        description: "Receipt approved. Stock should increase automatically (trigger).",
       });
 
       fetchReceipts();
       fetchAuditForReceipt(receiptId);
     } catch (e: any) {
       toast({
-        title: 'Approve failed',
-        description: e?.message || 'Could not approve receipt',
-        variant: 'destructive',
+        title: "Approve failed",
+        description: e?.message || "Could not approve receipt",
+        variant: "destructive",
       });
     } finally {
       setProcessing(receiptId, false);
@@ -546,7 +634,7 @@ export default function StockApprovals() {
 
   const openReject = (receiptId: string) => {
     setRejectingId(receiptId);
-    setRejectReason('');
+    setRejectReason("");
     setRejectOpen(true);
   };
 
@@ -558,35 +646,35 @@ export default function StockApprovals() {
 
     try {
       const payload: any = {
-        status: 'rejected',
+        status: "rejected",
         rejected_by: user.id,
         rejected_at: new Date().toISOString(),
         rejection_reason: rejectReason.trim() ? rejectReason.trim() : null,
       };
 
-      const { error } = await supabase
-        .from('warehouse_receipts' as any)
+      const { error } = await sb
+        .from("warehouse_receipts")
         .update(payload)
-        .eq('id', receiptId)
-        .eq('status', 'pending');
+        .eq("id", receiptId)
+        .eq("status", "pending");
 
       if (error) throw error;
 
       toast({
-        title: 'Rejected',
-        description: rejectReason.trim() ? 'Receipt rejected with reason saved.' : 'Receipt rejected.',
+        title: "Rejected",
+        description: rejectReason.trim() ? "Receipt rejected with reason saved." : "Receipt rejected.",
       });
 
       setRejectOpen(false);
       setRejectingId(null);
-      setRejectReason('');
+      setRejectReason("");
       fetchReceipts();
       fetchAuditForReceipt(receiptId);
     } catch (e: any) {
       toast({
-        title: 'Reject failed',
-        description: e?.message || 'Could not reject receipt',
-        variant: 'destructive',
+        title: "Reject failed",
+        description: e?.message || "Could not reject receipt",
+        variant: "destructive",
       });
     } finally {
       setProcessing(receiptId, false);
@@ -594,26 +682,35 @@ export default function StockApprovals() {
   };
 
   const statusBadge = (s: ReceiptStatus) => {
-    if (s === 'pending') return <Badge className="bg-yellow-500">Pending</Badge>;
-    if (s === 'approved') return <Badge className="bg-green-500">Approved</Badge>;
+    if (s === "pending") return <Badge className="bg-yellow-500">Pending</Badge>;
+    if (s === "approved") return <Badge className="bg-green-500">Approved</Badge>;
     return <Badge className="bg-red-500">Rejected</Badge>;
   };
 
+  const branchBadge = (branchId?: string | null) => {
+    const name = getBranchLabel(branchId);
+    return (
+      <Badge variant="secondary" className="bg-slate-700 text-slate-100">
+        {name}
+      </Badge>
+    );
+  };
+
   // -----------------------------
-  // PDF EXPORT (Admin) — nicer layout + correct image scaling
+  // PDF EXPORT (Admin) — includes Branch
   // -----------------------------
   const exportReceiptPdf = async (r: ReceiptRow, includeAudit: boolean) => {
     let audit = auditMap.get(r.id) || [];
 
     if (includeAudit && audit.length === 0) {
       try {
-        const { data } = await supabase
-          .from('warehouse_receipt_audit' as any)
-          .select('id, receipt_id, action, from_status, to_status, actor_id, note, created_at')
-          .eq('receipt_id', r.id)
-          .order('created_at', { ascending: false });
+        const { data } = await sb
+          .from("warehouse_receipt_audit")
+          .select("id, receipt_id, action, from_status, to_status, actor_id, note, created_at")
+          .eq("receipt_id", r.id)
+          .order("created_at", { ascending: false });
 
-        audit = (data ?? []) as unknown as AuditRow[];
+        audit = (data ?? []) as AuditRow[];
         setAuditMap((prev) => {
           const next = new Map(prev);
           next.set(r.id, audit);
@@ -624,14 +721,16 @@ export default function StockApprovals() {
       }
     }
 
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
 
-    const brand = 'Philuz Appz';
-    const createdBy = userNameMap.get(r.created_by) || 'Unknown';
-    const approvedBy = r.approved_by ? userNameMap.get(String(r.approved_by)) || 'Unknown' : '';
-    const rejectedBy = r.rejected_by ? userNameMap.get(String(r.rejected_by)) || 'Unknown' : '';
+    const brand = "Philuz Appz";
+    const createdBy = userNameMap.get(r.created_by) || "Unknown";
+    const approvedBy = r.approved_by ? userNameMap.get(String(r.approved_by)) || "Unknown" : "";
+    const rejectedBy = r.rejected_by ? userNameMap.get(String(r.rejected_by)) || "Unknown" : "";
 
-    // Header (clean + compact)
+    const branchText = getBranchLabel(r.branch_id);
+
+    // Header
     doc.setFontSize(16);
     doc.setTextColor(15, 23, 42);
     doc.text(`${brand} — Stock Receipt`, 40, 42);
@@ -643,14 +742,14 @@ export default function StockApprovals() {
     // Status chip
     const statusText = safeUpper(r.status);
     let chipColor: [number, number, number] = [245, 158, 11];
-    if (r.status === 'approved') chipColor = [34, 197, 94];
-    if (r.status === 'rejected') chipColor = [239, 68, 68];
+    if (r.status === "approved") chipColor = [34, 197, 94];
+    if (r.status === "rejected") chipColor = [239, 68, 68];
 
     doc.setFillColor(...chipColor);
-    doc.roundedRect(440, 28, 120, 22, 10, 10, 'F');
+    doc.roundedRect(440, 28, 120, 22, 10, 10, "F");
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(10);
-    doc.text(statusText, 500, 43, { align: 'center' });
+    doc.text(statusText, 500, 43, { align: "center" });
 
     // Meta block
     doc.setTextColor(15, 23, 42);
@@ -660,26 +759,27 @@ export default function StockApprovals() {
     const rightX = 320;
     let y = 86;
 
-    doc.text(`Car Number: ${r.car_number}`, leftX, y);
-    doc.text(`Captured At: ${fmtDate(r.created_at)}`, leftX, y + 16);
-    doc.text(`Captured By: ${createdBy}`, leftX, y + 32);
+    doc.text(`Branch: ${branchText}`, leftX, y);
+    doc.text(`Car Number: ${r.car_number}`, leftX, y + 16);
+    doc.text(`Captured At: ${fmtDate(r.created_at)}`, leftX, y + 32);
+    doc.text(`Captured By: ${createdBy}`, leftX, y + 48);
 
     if (r.notes) {
       doc.setTextColor(71, 85, 105);
-      doc.text(`Notes: ${r.notes}`, leftX, y + 52, { maxWidth: 520 });
+      doc.text(`Notes: ${r.notes}`, leftX, y + 68, { maxWidth: 520 });
       doc.setTextColor(15, 23, 42);
       y += 18;
     }
 
     // Decision info (right column)
-    if (r.status === 'approved') {
+    if (r.status === "approved") {
       doc.text(`Approved By: ${approvedBy}`, rightX, 86);
       doc.text(`Approved At: ${fmtDate(r.approved_at)}`, rightX, 102);
-    } else if (r.status === 'rejected') {
+    } else if (r.status === "rejected") {
       doc.text(`Rejected By: ${rejectedBy}`, rightX, 86);
       doc.text(`Rejected At: ${fmtDate(r.rejected_at)}`, rightX, 102);
       doc.setTextColor(185, 28, 28);
-      doc.text(`Reason: ${r.rejection_reason || '—'}`, rightX, 118, { maxWidth: 240 });
+      doc.text(`Reason: ${r.rejection_reason || "—"}`, rightX, 118, { maxWidth: 240 });
       doc.setTextColor(15, 23, 42);
     } else {
       doc.setTextColor(71, 85, 105);
@@ -696,9 +796,9 @@ export default function StockApprovals() {
       const after = current + qty;
 
       return [
-        p?.name || 'Unknown product',
-        p?.sku || '-',
-        p?.unit || '-',
+        p?.name || "Unknown product",
+        p?.sku || "-",
+        p?.unit || "-",
         qty.toLocaleString(),
         current.toLocaleString(),
         after.toLocaleString(),
@@ -707,37 +807,34 @@ export default function StockApprovals() {
 
     autoTable(doc, {
       startY: 170,
-      head: [['Product', 'SKU', 'Unit', 'Qty Received', 'Current Stock', 'After Approval']],
-      body: body.length ? body : [['—', '—', '—', '—', '—', '—']],
+      head: [["Product", "SKU", "Unit", "Qty Received", "Current Stock", "After Approval"]],
+      body: body.length ? body : [["—", "—", "—", "—", "—", "—"]],
       styles: { fontSize: 9, cellPadding: 4 },
       margin: { left: 40, right: 40 },
       headStyles: { fillColor: [30, 41, 59] as any },
       columnStyles: {
-        3: { halign: 'right', cellWidth: 70 },
-        4: { halign: 'right', cellWidth: 80 },
-        5: { halign: 'right', cellWidth: 90 },
+        3: { halign: "right", cellWidth: 70 },
+        4: { halign: "right", cellWidth: 80 },
+        5: { halign: "right", cellWidth: 90 },
       },
     });
 
     y = (doc as any).lastAutoTable?.finalY || 250;
 
-    // ✅ Waybill images (embedded, smaller + clean like your MyReceipts)
-    // We embed up to 2 images as “previews”. If you want more, we can add a new page grid.
+    // Waybill embed preview (up to 2)
     const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
 
     if (rawWaybills.length > 0) {
-      // create signed urls (private bucket)
       const signed: string[] = [];
       for (const u of rawWaybills.slice(0, 2)) {
         const path = extractWaybillPath(u);
-        if (!path || path.startsWith('http')) continue;
+        if (!path || path.startsWith("http")) continue;
 
-        const { data } = await supabase.storage.from('waybills').createSignedUrl(path, 3600);
+        const { data } = await supabase.storage.from("waybills").createSignedUrl(path, 3600);
         if (data?.signedUrl) signed.push(data.signedUrl);
       }
 
       if (signed.length > 0) {
-        // section title
         y += 26;
         if (y > 700) {
           doc.addPage();
@@ -750,11 +847,14 @@ export default function StockApprovals() {
 
         doc.setFontSize(9);
         doc.setTextColor(71, 85, 105);
-        doc.text(`Showing ${signed.length} of ${rawWaybills.length} (signed links expire ~1 hour)`, 40, y + 14);
+        doc.text(
+          `Showing ${signed.length} of ${rawWaybills.length} (signed links expire ~1 hour)`,
+          40,
+          y + 14
+        );
 
         y += 26;
 
-        // layout boxes (two columns)
         const boxW = 250;
         const boxH = 180;
         const gap = 20;
@@ -771,10 +871,9 @@ export default function StockApprovals() {
             y = 60;
           }
 
-          // draw box
           doc.setDrawColor(203, 213, 225);
           doc.setFillColor(248, 250, 252);
-          doc.roundedRect(x, top, boxW, boxH, 10, 10, 'FD');
+          doc.roundedRect(x, top, boxW, boxH, 10, 10, "FD");
 
           const imgInfo = await imageUrlToDataUrl(signed[i]);
           if (imgInfo) {
@@ -787,27 +886,24 @@ export default function StockApprovals() {
             const iy = top + (boxH - fitted.h) / 2;
 
             try {
-              doc.addImage(imgInfo.dataUrl, imgInfo.format, ix, iy, fitted.w, fitted.h, undefined, 'FAST');
+              doc.addImage(imgInfo.dataUrl, imgInfo.format, ix, iy, fitted.w, fitted.h, undefined, "FAST");
             } catch {
               // ignore embed failure
             }
           } else {
             doc.setTextColor(100, 116, 139);
             doc.setFontSize(10);
-            doc.text('Could not embed image', x + boxW / 2, top + boxH / 2, { align: 'center' });
+            doc.text("Could not embed image", x + boxW / 2, top + boxH / 2, { align: "center" });
           }
 
-          // caption
           doc.setTextColor(71, 85, 105);
           doc.setFontSize(9);
           doc.text(`Waybill ${i + 1}`, x, top + boxH + 16);
         }
 
-        // update y after image block
         const rowsUsed = Math.ceil(signed.length / 2);
         y = y + rowsUsed * (boxH + 26) + 8;
       } else {
-        // still show that there is a waybill
         y += 26;
         if (y > 760) {
           doc.addPage();
@@ -825,10 +921,10 @@ export default function StockApprovals() {
       const auditRows = (audit || []).slice(0, 12).map((a) => [
         fmtDate(a.created_at),
         a.action,
-        a.from_status || '—',
-        a.to_status || '—',
-        a.actor_id ? userNameMap.get(a.actor_id) || 'Unknown' : '—',
-        a.note || '',
+        a.from_status || "—",
+        a.to_status || "—",
+        a.actor_id ? userNameMap.get(a.actor_id) || "Unknown" : "—",
+        a.note || "",
       ]);
 
       y += 20;
@@ -839,12 +935,12 @@ export default function StockApprovals() {
 
       doc.setFontSize(11);
       doc.setTextColor(15, 23, 42);
-      doc.text('Audit Log (latest)', 40, y);
+      doc.text("Audit Log (latest)", 40, y);
 
       autoTable(doc, {
         startY: y + 10,
-        head: [['When', 'Action', 'From', 'To', 'By', 'Note']],
-        body: auditRows.length ? auditRows : [['—', 'No audit entries', '—', '—', '—', '—']],
+        head: [["When", "Action", "From", "To", "By", "Note"]],
+        body: auditRows.length ? auditRows : [["—", "No audit entries", "—", "—", "—", "—"]],
         styles: { fontSize: 8, cellPadding: 3 },
         margin: { left: 40, right: 40 },
         headStyles: { fillColor: [15, 23, 42] as any },
@@ -854,93 +950,70 @@ export default function StockApprovals() {
           2: { cellWidth: 55 },
           3: { cellWidth: 55 },
           4: { cellWidth: 75 },
-          5: { cellWidth: 'auto' },
+          5: { cellWidth: "auto" },
         },
       });
 
       y = (doc as any).lastAutoTable?.finalY || y + 70;
     }
 
-    // Signatures (simple + neat)
-    y += 26;
-    if (y > 750) {
-      doc.addPage();
-      y = 60;
-    }
-
-    doc.setFontSize(10);
-    doc.setTextColor(15, 23, 42);
-
-    doc.text('Prepared By (Warehouse):', 40, y);
-    doc.setTextColor(71, 85, 105);
-    doc.text(`${createdBy}`, 40, y + 14);
-    doc.text('Signature: ___________________________', 40, y + 34);
-    doc.text(`Date: ${fmtDate(r.created_at)}`, 40, y + 54);
-
-    doc.setTextColor(15, 23, 42);
-    doc.text('Reviewed / Approved By (Admin):', 320, y);
-    doc.setTextColor(71, 85, 105);
-    doc.text(
-      `${r.status === 'approved' ? approvedBy : r.status === 'rejected' ? rejectedBy : '________________'}`,
-      320,
-      y + 14
-    );
-    doc.text('Signature: ___________________________', 320, y + 34);
-    doc.text(
-      `Date: ${
-        r.status === 'approved'
-          ? fmtDate(r.approved_at)
-          : r.status === 'rejected'
-            ? fmtDate(r.rejected_at)
-            : '________________'
-      }`,
-      320,
-      y + 54
-    );
-
     // Footer
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
     doc.text(`${brand} • Generated: ${new Date().toLocaleString()}`, 40, 820);
 
-    const filename = `StockReceipt-${r.car_number}-${r.status}${includeAudit ? '-audit' : ''}.pdf`;
+    const filename = `StockReceipt-${r.car_number}-${r.status}${includeAudit ? "-audit" : ""}.pdf`;
     forceDownloadPdf(doc, filename);
   };
 
   const exportFilteredPdf = () => {
     if (filtered.length === 0) {
-      toast({ title: 'Nothing to export', description: 'No receipts in this view.' });
+      toast({ title: "Nothing to export", description: "No receipts in this view." });
       return;
     }
 
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-    const brand = 'Philuz Appz';
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const brand = "Philuz Appz";
 
     doc.setFontSize(14);
     doc.setTextColor(15, 23, 42);
     doc.text(`${brand} — Stock Receipts Export`, 40, 40);
+
     doc.setFontSize(10);
     doc.setTextColor(71, 85, 105);
-    doc.text(`Tab: ${tab.toUpperCase()} • Exported: ${new Date().toLocaleString()}`, 40, 60);
+    doc.text(
+      `Tab: ${tab.toUpperCase()} • Branch: ${
+        isAdmin ? (activeBranchId ? getBranchLabel(activeBranchId) : "All branches") : "—"
+      } • Exported: ${new Date().toLocaleString()}`,
+      40,
+      60
+    );
 
     const body = filtered.map((r) => {
-      const createdBy = userNameMap.get(r.created_by) || 'Unknown';
+      const createdBy = userNameMap.get(r.created_by) || "Unknown";
       const qtyTotal = (r.items || []).reduce((sum, it) => sum + Number(it.quantity || 0), 0);
       const wb = normalizeWaybillUrls(r.waybill_urls).length;
+
       return [
+        // ✅ include branch in export when all branches mode
+        !activeBranchId ? getBranchLabel(r.branch_id) : "",
         r.car_number,
         createdBy,
         fmtDate(r.created_at),
         (r.items?.length || 0).toString(),
         qtyTotal.toLocaleString(),
         r.status.toUpperCase(),
-        wb > 0 ? `YES (${wb})` : 'NO',
+        wb > 0 ? `YES (${wb})` : "NO",
       ];
     });
 
+    const head = !activeBranchId
+      ? [["Branch", "Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]]
+      : [["Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]];
+
     autoTable(doc, {
       startY: 80,
-      head: [['Car #', 'Captured By', 'Captured At', 'Lines', 'Total Qty', 'Status', 'Waybill']],
+      head,
       body,
       styles: { fontSize: 9 },
       margin: { left: 40, right: 40 },
@@ -961,7 +1034,17 @@ export default function StockApprovals() {
         <div>
           <h1 className="text-2xl font-bold text-white">Stock Approvals</h1>
           <p className="text-slate-400">
-            Brand: <b>Philuz Appz</b> • Review warehouse receiving before approving stock updates
+            Brand: <b>Philuz Appz</b> •{" "}
+            {isAdmin ? (
+              <>
+                Viewing:{" "}
+                <b className="text-white">
+                  {activeBranchId ? getBranchLabel(activeBranchId) : "All branches"}
+                </b>
+              </>
+            ) : (
+              "Review warehouse receiving before approving stock updates"
+            )}
           </p>
         </div>
 
@@ -979,15 +1062,15 @@ export default function StockApprovals() {
 
       {/* Tabs */}
       <div className="flex flex-wrap gap-2">
-        <Button variant={tab === 'pending' ? 'default' : 'outline'} onClick={() => setTab('pending')}>
+        <Button variant={tab === "pending" ? "default" : "outline"} onClick={() => setTab("pending")}>
           <Clock className="h-4 w-4 mr-2" />
           Pending
         </Button>
-        <Button variant={tab === 'approved' ? 'default' : 'outline'} onClick={() => setTab('approved')}>
+        <Button variant={tab === "approved" ? "default" : "outline"} onClick={() => setTab("approved")}>
           <CheckCircle className="h-4 w-4 mr-2" />
           Approved
         </Button>
-        <Button variant={tab === 'rejected' ? 'default' : 'outline'} onClick={() => setTab('rejected')}>
+        <Button variant={tab === "rejected" ? "default" : "outline"} onClick={() => setTab("rejected")}>
           <XCircle className="h-4 w-4 mr-2" />
           Rejected
         </Button>
@@ -1004,14 +1087,14 @@ export default function StockApprovals() {
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Car number, staff name, notes, product..."
+              placeholder="Car number, staff name, branch, notes, product..."
               className="bg-slate-800 border-slate-700 text-white"
             />
           </div>
 
           <div className="text-sm text-slate-400">
-            Receipts: <b className="text-white">{totals.receiptCount}</b> • Lines:{' '}
-            <b className="text-white">{totals.linesCount}</b> • Total Qty:{' '}
+            Receipts: <b className="text-white">{totals.receiptCount}</b> • Lines:{" "}
+            <b className="text-white">{totals.linesCount}</b> • Total Qty:{" "}
             <b className="text-white">{totals.qtyTotal.toLocaleString()}</b>
           </div>
         </CardContent>
@@ -1030,6 +1113,11 @@ export default function StockApprovals() {
           <Table>
             <TableHeader>
               <TableRow className="border-slate-700">
+                {/* ✅ show branch column only when All branches */}
+                {isAdmin && !activeBranchId && (
+                  <TableHead className="text-slate-400">Branch</TableHead>
+                )}
+
                 <TableHead className="text-slate-400">Car #</TableHead>
                 <TableHead className="text-slate-400">Captured By</TableHead>
                 <TableHead className="text-slate-400">Captured At</TableHead>
@@ -1044,21 +1132,24 @@ export default function StockApprovals() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center text-slate-400 py-10">
+                  <TableCell colSpan={isAdmin && !activeBranchId ? 10 : 9} className="text-center text-slate-400 py-10">
                     Loading...
                   </TableCell>
                 </TableRow>
               ) : filtered.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center text-slate-400 py-10">
+                  <TableCell colSpan={isAdmin && !activeBranchId ? 10 : 9} className="text-center text-slate-400 py-10">
                     No receipts found.
                   </TableCell>
                 </TableRow>
               ) : (
                 filtered.map((r) => {
                   const isOpen = expanded.has(r.id);
-                  const totalQty = (r.items || []).reduce((sum, it) => sum + Number(it.quantity || 0), 0);
-                  const creatorName = userNameMap.get(r.created_by) || 'Unknown';
+                  const totalQty = (r.items || []).reduce(
+                    (sum, it) => sum + Number(it.quantity || 0),
+                    0
+                  );
+                  const creatorName = userNameMap.get(r.created_by) || "Unknown";
                   const busy = processingIds.has(r.id);
                   const audit = auditMap.get(r.id) || [];
                   const waybillCount = normalizeWaybillUrls(r.waybill_urls).length;
@@ -1066,6 +1157,12 @@ export default function StockApprovals() {
                   return (
                     <Fragment key={r.id}>
                       <TableRow className="border-slate-700">
+                        {isAdmin && !activeBranchId && (
+                          <TableCell className="text-slate-300">
+                            {branchBadge(r.branch_id)}
+                          </TableCell>
+                        )}
+
                         <TableCell className="text-white font-medium">
                           <button
                             type="button"
@@ -1122,10 +1219,10 @@ export default function StockApprovals() {
                               PDF + Audit
                             </Button>
 
-                            {r.status === 'pending' ? (
+                            {r.status === "pending" ? (
                               <>
                                 <Button size="sm" onClick={() => approveReceipt(r.id)} disabled={busy}>
-                                  {busy ? 'Working...' : 'Approve'}
+                                  {busy ? "Working..." : "Approve"}
                                 </Button>
                                 <Button size="sm" variant="outline" onClick={() => openReject(r.id)} disabled={busy}>
                                   Reject
@@ -1140,37 +1237,52 @@ export default function StockApprovals() {
 
                       {isOpen && (
                         <TableRow className="border-slate-700">
-                          <TableCell colSpan={9} className="p-0">
+                          <TableCell colSpan={isAdmin && !activeBranchId ? 10 : 9} className="p-0">
                             <div className="bg-slate-900/40 border-t border-slate-700 p-4 space-y-4">
                               {/* Notes + decision info */}
                               <div className="grid md:grid-cols-2 gap-3">
                                 <div className="text-sm text-slate-300">
-                                  <span className="text-slate-400">Notes:</span>{' '}
+                                  {/* ✅ show branch info also inside expanded view when All branches */}
+                                  {isAdmin && !activeBranchId && (
+                                    <div className="mb-2">
+                                      <span className="text-slate-400">Branch:</span>{" "}
+                                      <span className="text-white font-medium">
+                                        {getBranchLabel(r.branch_id)}
+                                      </span>
+                                    </div>
+                                  )}
+
+                                  <span className="text-slate-400">Notes:</span>{" "}
                                   {r.notes || <span className="text-slate-500">No notes</span>}
                                 </div>
 
                                 <div className="text-sm text-slate-300">
-                                  {r.status === 'approved' && (
+                                  {r.status === "approved" && (
                                     <>
-                                      <span className="text-slate-400">Approved By:</span>{' '}
-                                      {r.approved_by ? userNameMap.get(String(r.approved_by)) || 'Unknown' : '—'}
+                                      <span className="text-slate-400">Approved By:</span>{" "}
+                                      {r.approved_by
+                                        ? userNameMap.get(String(r.approved_by)) || "Unknown"
+                                        : "—"}
                                       <br />
                                       <span className="text-slate-400">Approved At:</span> {fmtDate(r.approved_at)}
                                     </>
                                   )}
 
-                                  {r.status === 'rejected' && (
+                                  {r.status === "rejected" && (
                                     <>
-                                      <span className="text-slate-400">Rejected By:</span>{' '}
-                                      {r.rejected_by ? userNameMap.get(String(r.rejected_by)) || 'Unknown' : '—'}
+                                      <span className="text-slate-400">Rejected By:</span>{" "}
+                                      {r.rejected_by
+                                        ? userNameMap.get(String(r.rejected_by)) || "Unknown"
+                                        : "—"}
                                       <br />
                                       <span className="text-slate-400">Rejected At:</span> {fmtDate(r.rejected_at)}
                                       <br />
-                                      <span className="text-slate-400">Reason:</span> {r.rejection_reason || '—'}
+                                      <span className="text-slate-400">Reason:</span>{" "}
+                                      {r.rejection_reason || "—"}
                                     </>
                                   )}
 
-                                  {r.status === 'pending' && (
+                                  {r.status === "pending" && (
                                     <span className="text-slate-400">
                                       Pending approval — stock updates only after approve.
                                     </span>
@@ -1194,7 +1306,9 @@ export default function StockApprovals() {
                                     </div>
                                   </div>
                                 ) : (
-                                  <div className="text-xs text-slate-500">No waybill attached (optional).</div>
+                                  <div className="text-xs text-slate-500">
+                                    No waybill attached (optional).
+                                  </div>
                                 )}
                               </div>
 
@@ -1208,7 +1322,9 @@ export default function StockApprovals() {
                                       <TableHead className="text-slate-400">Unit</TableHead>
                                       <TableHead className="text-slate-400 text-right">Qty Received</TableHead>
                                       <TableHead className="text-slate-400 text-right">Current Stock</TableHead>
-                                      <TableHead className="text-slate-400 text-right">After Approval (Preview)</TableHead>
+                                      <TableHead className="text-slate-400 text-right">
+                                        After Approval (Preview)
+                                      </TableHead>
                                     </TableRow>
                                   </TableHeader>
                                   <TableBody>
@@ -1221,13 +1337,19 @@ export default function StockApprovals() {
                                       return (
                                         <TableRow key={it.id} className="border-slate-700">
                                           <TableCell className="text-white font-medium">
-                                            {p?.name || 'Unknown product'}
+                                            {p?.name || "Unknown product"}
                                           </TableCell>
-                                          <TableCell className="text-slate-300">{p?.sku || '-'}</TableCell>
-                                          <TableCell className="text-slate-300">{p?.unit || '-'}</TableCell>
-                                          <TableCell className="text-slate-300 text-right">{qty.toLocaleString()}</TableCell>
-                                          <TableCell className="text-slate-300 text-right">{current.toLocaleString()}</TableCell>
-                                          <TableCell className="text-slate-300 text-right">{after.toLocaleString()}</TableCell>
+                                          <TableCell className="text-slate-300">{p?.sku || "-"}</TableCell>
+                                          <TableCell className="text-slate-300">{p?.unit || "-"}</TableCell>
+                                          <TableCell className="text-slate-300 text-right">
+                                            {qty.toLocaleString()}
+                                          </TableCell>
+                                          <TableCell className="text-slate-300 text-right">
+                                            {current.toLocaleString()}
+                                          </TableCell>
+                                          <TableCell className="text-slate-300 text-right">
+                                            {after.toLocaleString()}
+                                          </TableCell>
                                         </TableRow>
                                       );
                                     })}
@@ -1257,18 +1379,18 @@ export default function StockApprovals() {
                                         className="text-xs text-slate-300 flex flex-col md:flex-row md:items-center md:justify-between gap-1 border-b border-slate-800 pb-2"
                                       >
                                         <div>
-                                          <span className="text-slate-400">{fmtDate(a.created_at)}</span> •{' '}
-                                          <span className="text-white">{a.action}</span>{' '}
+                                          <span className="text-slate-400">{fmtDate(a.created_at)}</span> •{" "}
+                                          <span className="text-white">{a.action}</span>{" "}
                                           {a.from_status || a.to_status ? (
                                             <span className="text-slate-400">
-                                              ({a.from_status || '—'} → {a.to_status || '—'})
+                                              ({a.from_status || "—"} → {a.to_status || "—"})
                                             </span>
                                           ) : null}
                                           {a.note ? <span className="text-slate-400"> • {a.note}</span> : null}
                                         </div>
 
                                         <div className="text-slate-400">
-                                          By: {a.actor_id ? userNameMap.get(a.actor_id) || 'Unknown' : '—'}
+                                          By: {a.actor_id ? userNameMap.get(a.actor_id) || "Unknown" : "—"}
                                         </div>
                                       </div>
                                     ))}
@@ -1335,7 +1457,7 @@ export default function StockApprovals() {
         <DialogContent className="bg-slate-900 border-slate-700 max-w-3xl">
           <DialogHeader>
             <DialogTitle className="text-white">
-              Waybill Preview {waybillActiveReceiptId ? `• ${waybillActiveReceiptId}` : ''}
+              Waybill Preview {waybillActiveReceiptId ? `• ${waybillActiveReceiptId}` : ""}
             </DialogTitle>
           </DialogHeader>
 
@@ -1345,7 +1467,7 @@ export default function StockApprovals() {
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs text-slate-400">
-                  Image <b className="text-white">{waybillActiveIndex + 1}</b> of{' '}
+                  Image <b className="text-white">{waybillActiveIndex + 1}</b> of{" "}
                   <b className="text-white">{waybillActiveUrls.length}</b>
                 </div>
 
@@ -1363,7 +1485,9 @@ export default function StockApprovals() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setWaybillActiveIndex((i) => Math.min(waybillActiveUrls.length - 1, i + 1))}
+                    onClick={() =>
+                      setWaybillActiveIndex((i) => Math.min(waybillActiveUrls.length - 1, i + 1))
+                    }
                     disabled={waybillActiveIndex >= waybillActiveUrls.length - 1}
                     title="Next"
                   >
@@ -1374,7 +1498,6 @@ export default function StockApprovals() {
               </div>
 
               <div className="rounded-md border border-slate-700 bg-black/20 p-2">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={waybillActiveUrls[waybillActiveIndex]}
                   alt="Waybill"
