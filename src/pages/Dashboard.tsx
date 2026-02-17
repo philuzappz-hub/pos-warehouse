@@ -1,3 +1,4 @@
+// src/pages/Dashboard.tsx
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
@@ -40,6 +41,15 @@ type BranchRow = {
   created_at?: string;
 };
 
+type BranchBreakdownRow = {
+  branchId: string;
+  branchName: string;
+  totalProducts: number;
+  lowStock: number;
+  pendingStockReceipts: number;
+  todayAttendance: number;
+};
+
 function makeBranchCode(name: string) {
   // e.g. "Walewale Branch" -> "WALE" + random 3 digits => "WALE-472"
   const base = name
@@ -56,10 +66,18 @@ function makeBranchCode(name: string) {
   return `${short}-${rand}`;
 }
 
+function applyBranchScope(query: any, branchId: string | null) {
+  if (!branchId) return query;
+  return query.eq("branch_id", branchId);
+}
+
 export default function Dashboard() {
-  const { user, profile, roles, isAdmin } = useAuth();
+  const { user, profile, roles, isAdmin, activeBranchId } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
+
+  // ✅ fixes TS “Type instantiation is excessively deep”
+  const sb = supabase as any;
 
   const [stats, setStats] = useState<DashboardStats>({
     todaySales: 0,
@@ -79,6 +97,10 @@ export default function Dashboard() {
   const [creatingBranch, setCreatingBranch] = useState(false);
   const [newBranchName, setNewBranchName] = useState("");
 
+  // ✅ Admin-only: branch breakdown when All branches selected
+  const [breakdownLoading, setBreakdownLoading] = useState(false);
+  const [branchBreakdown, setBranchBreakdown] = useState<BranchBreakdownRow[]>([]);
+
   const isCashier = useMemo(() => roles.includes("cashier" as any), [roles]);
   const isWarehouse = useMemo(() => roles.includes("warehouse" as any), [roles]);
 
@@ -92,10 +114,11 @@ export default function Dashboard() {
   const canSeeStockBalance = isWarehouse;
   const canSeeStockApprovals = isAdmin;
 
+  // ✅ refresh stats when branch changes (for admin)
   useEffect(() => {
     fetchStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, isWarehouse, isCashier, user?.id]);
+  }, [isAdmin, isWarehouse, isCashier, user?.id, activeBranchId]);
 
   // ✅ Load branches (Admin only)
   useEffect(() => {
@@ -105,11 +128,27 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, profile?.company_id]);
 
+  // ✅ If Admin is viewing ALL branches, load per-branch breakdown
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (!profile?.company_id) return;
+
+    if (activeBranchId) {
+      setBranchBreakdown([]);
+      return;
+    }
+
+    if (branches.length === 0) return;
+
+    fetchBranchBreakdown();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, profile?.company_id, activeBranchId, branches.length]);
+
   const fetchBranches = async () => {
     if (!profile?.company_id) return;
     setBranchesLoading(true);
     try {
-      const { data, error } = await supabase
+      const { data, error } = await sb
         .from("branches")
         .select("id,name,code,company_id,is_active,created_at")
         .eq("company_id", profile.company_id)
@@ -117,8 +156,7 @@ export default function Dashboard() {
 
       if (error) throw error;
 
-      // ✅ FIX TS: cast via unknown first
-      const rows = (data ?? []) as unknown as BranchRow[];
+      const rows = (data ?? []) as BranchRow[];
       setBranches(rows);
     } catch (e: any) {
       console.error("fetchBranches error:", e);
@@ -154,12 +192,11 @@ export default function Dashboard() {
       return;
     }
 
-    // ✅ REQUIRED because branches.code is NOT NULL
     const code = makeBranchCode(name);
 
     setCreatingBranch(true);
     try {
-      const { data, error } = await supabase
+      const { data, error } = await sb
         .from("branches")
         .insert([{ name, code, company_id: companyId, is_active: true }])
         .select("id,name,code,company_id,is_active,created_at")
@@ -173,18 +210,68 @@ export default function Dashboard() {
       });
 
       setNewBranchName("");
-      setBranches((prev) => [...prev, data as unknown as BranchRow]);
+      setBranches((prev) => [...prev, data as BranchRow]);
     } catch (e: any) {
       console.error("createBranch error:", e);
       toast({
         title: "Failed to create branch",
-        description:
-          e?.message ||
-          "This is usually an RLS policy issue on the branches table.",
+        description: e?.message || "This is usually an RLS policy issue on the branches table.",
         variant: "destructive",
       });
     } finally {
       setCreatingBranch(false);
+    }
+  };
+
+  const fetchBranchBreakdown = async () => {
+    if (!isAdmin) return;
+    if (!branches.length) return;
+
+    setBreakdownLoading(true);
+    try {
+      const today = new Date().toISOString().split("T")[0];
+
+      const rows = await Promise.all(
+        branches.map(async (b) => {
+          const [productsRes, lowStockRes, receiptsRes, attendanceRes] = await Promise.all([
+            sb.from("products").select("id", { count: "exact", head: true }).eq("branch_id", b.id),
+
+            sb
+              .from("products")
+              .select("id", { count: "exact", head: true })
+              .eq("branch_id", b.id)
+              .lt("quantity_in_stock", 10),
+
+            sb
+              .from("warehouse_receipts")
+              .select("id", { count: "exact", head: true })
+              .eq("branch_id", b.id)
+              .eq("status", "pending"),
+
+            sb
+              .from("attendance")
+              .select("id", { count: "exact", head: true })
+              .eq("branch_id", b.id)
+              .eq("date", today),
+          ]);
+
+          return {
+            branchId: b.id,
+            branchName: b.name,
+            totalProducts: Number(productsRes?.count ?? 0),
+            lowStock: Number(lowStockRes?.count ?? 0),
+            pendingStockReceipts: Number(receiptsRes?.count ?? 0),
+            todayAttendance: Number(attendanceRes?.count ?? 0),
+          } as BranchBreakdownRow;
+        })
+      );
+
+      setBranchBreakdown(rows);
+    } catch (e) {
+      console.warn("[Dashboard] branch breakdown failed:", e);
+      setBranchBreakdown([]);
+    } finally {
+      setBreakdownLoading(false);
     }
   };
 
@@ -193,27 +280,29 @@ export default function Dashboard() {
     try {
       const today = new Date().toISOString().split("T")[0];
 
-      // Sales stats should be cashier-only
+      // Sales stats should be cashier-only (branch-scoped by RLS / cashier context)
       const salesPromise = isCashier
-        ? supabase.from("sales").select("total_amount").gte("created_at", today)
+        ? sb.from("sales").select("total_amount").gte("created_at", today)
         : Promise.resolve({ data: [] as any[] } as any);
 
-      // Inventory stats should be admin-only
+      // Admin inventory stats -> branch-aware for selected branch
       const totalProductsPromise = isAdmin
-        ? supabase.from("products").select("id", { count: "exact", head: true })
+        ? applyBranchScope(sb.from("products").select("id", { count: "exact", head: true }), activeBranchId)
         : Promise.resolve({ count: 0 } as any);
 
       const lowStockPromise = isAdmin
-        ? supabase
-            .from("products")
-            .select("id", { count: "exact", head: true })
-            .lt("quantity_in_stock", 10)
+        ? applyBranchScope(
+            sb
+              .from("products")
+              .select("id", { count: "exact", head: true })
+              .lt("quantity_in_stock", 10),
+            activeBranchId
+          )
         : Promise.resolve({ count: 0 } as any);
 
-      // ✅ FIX TS: your generated types don't include these table names.
-      // Use untyped calls to avoid "type instantiation is excessively deep".
+      // Warehouse pending orders (leave as you had it)
       const pendingOrdersPromise = isWarehouse
-        ? (supabase as any)
+        ? sb
             .from("sale_coupons")
             .select(
               `
@@ -227,30 +316,31 @@ export default function Dashboard() {
             .eq("sales.status", "pending")
         : Promise.resolve({ count: 0 } as any);
 
-      // Attendance should be admin-only
+      // Attendance admin-only -> branch-aware
       const attendancePromise = isAdmin
-        ? supabase
-            .from("attendance")
-            .select("id", { count: "exact", head: true })
-            .eq("date", today)
+        ? applyBranchScope(
+            sb.from("attendance").select("id", { count: "exact", head: true }).eq("date", today),
+            activeBranchId
+          )
         : Promise.resolve({ count: 0 } as any);
 
-      // Stock receipts approvals should be admin-only
+      // Stock receipts approvals admin-only -> branch-aware
       const pendingStockReceiptsPromise = isAdmin
-        ? (supabase as any)
-            .from("warehouse_receipts")
-            .select("id", { count: "exact", head: true })
-            .eq("status", "pending")
+        ? applyBranchScope(
+            sb.from("warehouse_receipts").select("id", { count: "exact", head: true }).eq("status", "pending"),
+            activeBranchId
+          )
         : Promise.resolve({ count: 0 } as any);
 
-      // My pending receipts should be warehouse-only
-      const myPendingReceiptsPromise = isWarehouse && user?.id
-        ? (supabase as any)
-            .from("warehouse_receipts")
-            .select("id", { count: "exact", head: true })
-            .eq("status", "pending")
-            .eq("created_by", user.id)
-        : Promise.resolve({ count: 0 } as any);
+      // My pending receipts warehouse-only
+      const myPendingReceiptsPromise =
+        isWarehouse && user?.id
+          ? sb
+              .from("warehouse_receipts")
+              .select("id", { count: "exact", head: true })
+              .eq("status", "pending")
+              .eq("created_by", user.id)
+          : Promise.resolve({ count: 0 } as any);
 
       const [
         salesRes,
@@ -278,12 +368,12 @@ export default function Dashboard() {
 
       setStats({
         todaySales,
-        totalProducts: productsRes.count || 0,
-        lowStock: lowStockRes.count || 0,
-        pendingOrders: pendingOrdersRes?.count || 0,
-        todayAttendance: attendanceRes.count || 0,
-        pendingStockReceipts: pendingStockReceiptsRes?.count || 0,
-        myPendingReceipts: myPendingReceiptsRes?.count || 0,
+        totalProducts: Number(productsRes?.count ?? 0),
+        lowStock: Number(lowStockRes?.count ?? 0),
+        pendingOrders: Number(pendingOrdersRes?.count ?? 0),
+        todayAttendance: Number(attendanceRes?.count ?? 0),
+        pendingStockReceipts: Number(pendingStockReceiptsRes?.count ?? 0),
+        myPendingReceipts: Number(myPendingReceiptsRes?.count ?? 0),
       });
     } catch (error) {
       console.error("Error fetching stats:", error);
@@ -351,18 +441,13 @@ export default function Dashboard() {
     },
   ];
 
-  /**
-   * ✅ IMPORTANT FIX:
-   * - Admin sees only admin cards.
-   * - Non-admin sees cards based on their role(s).
-   */
+  // Admin sees only admin cards; non-admin sees by role
   const visibleCards = statCards.filter((card) => {
     if (isAdmin) return card.roles.includes("admin");
     return card.roles.some((role) => roles.includes(role as any));
   });
 
-  const showReportsSection =
-    canSeeDailySales || canSeeStockBalance || canSeeStockApprovals;
+  const showReportsSection = canSeeDailySales || canSeeStockBalance || canSeeStockApprovals;
 
   return (
     <div className="space-y-6">
@@ -398,6 +483,73 @@ export default function Dashboard() {
         ))}
       </div>
 
+      {/* ✅ ADMIN ONLY: when viewing ALL branches show a breakdown so branches are distinguished */}
+      {isAdmin && !activeBranchId && (
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader>
+            <CardTitle className="text-white">All Branches Breakdown</CardTitle>
+            <p className="text-slate-400 text-sm">
+              This appears only when you selected <b>All branches</b>.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400">
+                Products / Low stock / Pending receipts / Attendance (today)
+              </p>
+              <Button
+                variant="secondary"
+                onClick={fetchBranchBreakdown}
+                disabled={breakdownLoading || branches.length === 0}
+              >
+                {breakdownLoading ? "Refreshing..." : "Refresh"}
+              </Button>
+            </div>
+
+            {breakdownLoading ? (
+              <p className="text-slate-400 text-sm">Loading breakdown…</p>
+            ) : branchBreakdown.length === 0 ? (
+              <p className="text-slate-400 text-sm">
+                No breakdown data yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {branchBreakdown.map((r) => (
+                  <div
+                    key={r.branchId}
+                    className="rounded-md border border-slate-700 bg-slate-900/50 px-3 py-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <p className="text-white font-medium">{r.branchName}</p>
+                      <p className="text-xs text-slate-400">{r.branchId}</p>
+                    </div>
+
+                    <div className="mt-2 grid gap-2 sm:grid-cols-4">
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-500">Products:</span>{" "}
+                        {r.totalProducts}
+                      </div>
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-500">Low stock:</span>{" "}
+                        {r.lowStock}
+                      </div>
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-500">Pending receipts:</span>{" "}
+                        {r.pendingStockReceipts}
+                      </div>
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-500">Attendance:</span>{" "}
+                        {r.todayAttendance}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {showReportsSection && (
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader>
@@ -415,15 +567,11 @@ export default function Dashboard() {
                 onClick={() => navigate("/reports/daily-sales")}
               >
                 <CardContent className="p-4">
-                  <h3 className="text-white font-semibold">
-                    Daily Sales Report
-                  </h3>
+                  <h3 className="text-white font-semibold">Daily Sales Report</h3>
                   <p className="text-xs text-slate-400 mt-1">
                     Quantity sold per item per day
                   </p>
-                  <p className="text-[11px] text-slate-500 mt-2">
-                    Access: Cashier only
-                  </p>
+                  <p className="text-[11px] text-slate-500 mt-2">Access: Cashier only</p>
                 </CardContent>
               </Card>
             )}
@@ -435,15 +583,11 @@ export default function Dashboard() {
                 onClick={() => navigate("/reports/stock-balance")}
               >
                 <CardContent className="p-4">
-                  <h3 className="text-white font-semibold">
-                    Stock Balance Report
-                  </h3>
+                  <h3 className="text-white font-semibold">Stock Balance Report</h3>
                   <p className="text-xs text-slate-400 mt-1">
                     Remaining stock after sales day
                   </p>
-                  <p className="text-[11px] text-slate-500 mt-2">
-                    Access: Warehouse only
-                  </p>
+                  <p className="text-[11px] text-slate-500 mt-2">Access: Warehouse only</p>
                 </CardContent>
               </Card>
             )}
@@ -459,9 +603,7 @@ export default function Dashboard() {
                   <p className="text-xs text-slate-400 mt-1">
                     Review warehouse receiving before stock increases
                   </p>
-                  <p className="text-[11px] text-slate-500 mt-2">
-                    Access: Admin only
-                  </p>
+                  <p className="text-[11px] text-slate-500 mt-2">Access: Admin only</p>
                 </CardContent>
               </Card>
             )}
@@ -504,11 +646,7 @@ export default function Dashboard() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-white font-semibold">Your Branches</h3>
-                <Button
-                  variant="secondary"
-                  onClick={fetchBranches}
-                  disabled={branchesLoading}
-                >
+                <Button variant="secondary" onClick={fetchBranches} disabled={branchesLoading}>
                   {branchesLoading ? "Refreshing..." : "Refresh"}
                 </Button>
               </div>
