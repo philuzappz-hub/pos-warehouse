@@ -83,8 +83,16 @@ export default function Sidebar() {
     companyName,
   } = useAuth();
 
-  // ✅ read admin branch name saved by BranchSwitcher
+  // ✅ keep admin branch name synced from localStorage
   const [adminBranchNameCached, setAdminBranchNameCached] = useState<string>("");
+
+  const readCachedBranchName = () => {
+    try {
+      return localStorage.getItem(ADMIN_ACTIVE_BRANCH_NAME_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  };
 
   useEffect(() => {
     if (!isAdmin) {
@@ -92,16 +100,30 @@ export default function Sidebar() {
       return;
     }
 
-    try {
-      if (!activeBranchId) {
-        setAdminBranchNameCached("");
-        return;
+    // initial read
+    setAdminBranchNameCached(readCachedBranchName());
+
+    // listen for changes from other tabs/windows (and sometimes Vercel refreshes)
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === ADMIN_ACTIVE_BRANCH_NAME_KEY) {
+        setAdminBranchNameCached(e.newValue ?? "");
       }
-      const v = localStorage.getItem(ADMIN_ACTIVE_BRANCH_NAME_KEY) ?? "";
-      setAdminBranchNameCached(v);
-    } catch {
+    };
+    window.addEventListener("storage", onStorage);
+
+    return () => window.removeEventListener("storage", onStorage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
+
+  // also re-read whenever activeBranchId changes (same tab)
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (!activeBranchId) {
       setAdminBranchNameCached("");
+      return;
     }
+    setAdminBranchNameCached(readCachedBranchName());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, activeBranchId]);
 
   const filteredNav = navigation.filter((item) => {
@@ -123,7 +145,8 @@ export default function Sidebar() {
   const headerBranchLabel = useMemo(() => {
     if (isAdmin) {
       if (!activeBranchId) return "All branches";
-      return adminBranchNameCached?.trim() || "Selected branch";
+      // if we have an id but no name yet, show Loading (instead of “Selected branch”)
+      return adminBranchNameCached?.trim() || "Loading…";
     }
     return branchName ?? "Not assigned";
   }, [isAdmin, activeBranchId, adminBranchNameCached, branchName]);
@@ -135,7 +158,7 @@ export default function Sidebar() {
   // ✅ Admin “Viewing:” line label
   const adminViewingLabel = useMemo(() => {
     if (!activeBranchId) return "All branches";
-    return adminBranchNameCached?.trim() || "Selected branch";
+    return adminBranchNameCached?.trim() || "Loading…";
   }, [activeBranchId, adminBranchNameCached]);
 
   const initials = getInitials(companyDisplay || "Company");
@@ -202,7 +225,7 @@ export default function Sidebar() {
         </div>
       )}
 
-      {/* ✅ Staff branch info (extra clarity) */}
+      {/* ✅ Staff branch info */}
       {!isAdmin && (
         <div className="border-b border-slate-800 px-4 py-3">
           <p className="text-[11px] text-slate-400">Your Branch</p>
@@ -224,7 +247,6 @@ export default function Sidebar() {
                   : "text-slate-400 hover:bg-slate-800 hover:text-white"
               )}
             >
-              {/* left border indicator */}
               {active && (
                 <span className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r bg-emerald-400" />
               )}
