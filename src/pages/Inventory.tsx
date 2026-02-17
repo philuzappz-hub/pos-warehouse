@@ -45,7 +45,7 @@ const UNIT_OPTIONS = [
   { value: "roll", label: "Roll" },
 ];
 
-// ✅ Minimal local types (fixes "@/types/database" export issue)
+// ✅ Minimal local types
 type CategoryRow = {
   id: string;
   name: string;
@@ -81,6 +81,7 @@ export default function Inventory() {
 
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false); // ✅ prevent double submits
 
   // Product form
   const [productDialogOpen, setProductDialogOpen] = useState(false);
@@ -147,10 +148,7 @@ export default function Inventory() {
   };
 
   const fetchProducts = async () => {
-    let q = (supabase as any)
-      .from("products")
-      .select("*, category:categories(id,name)")
-      .order("name");
+    let q = supabase.from("products").select("*, category:categories(id,name)").order("name");
 
     if (activeBranchId) {
       q = q.eq("branch_id", activeBranchId);
@@ -234,56 +232,62 @@ export default function Inventory() {
   };
 
   const handleSaveProduct = async () => {
-    const name = productForm.name.trim();
-    if (!name) {
-      toast({ title: "Error", description: "Product name is required", variant: "destructive" });
-      return;
+    if (saving) return;
+    setSaving(true);
+
+    try {
+      const name = productForm.name.trim();
+      if (!name) {
+        toast({ title: "Error", description: "Product name is required", variant: "destructive" });
+        return;
+      }
+
+      const forcedBranchId = activeBranchId ?? null;
+      const formBranchId = productForm.branch_id || null;
+
+      const branch_id =
+        forcedBranchId ?? (editingProduct ? (editingProduct.branch_id ?? null) : formBranchId);
+
+      if (isAdmin && !activeBranchId && !editingProduct && !branch_id) {
+        toast({
+          title: "Branch required",
+          description: "Select a branch for this product (since you’re viewing All branches).",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const productData: any = {
+        name,
+        sku: productForm.sku.trim() || null,
+        category_id: productForm.category_id || null,
+        unit: productForm.unit,
+        unit_price: Number.parseFloat(productForm.unit_price) || 0,
+        reorder_level: Number.parseInt(productForm.reorder_level) || 10,
+        branch_id,
+      };
+
+      let error: any;
+
+      if (editingProduct) {
+        ({ error } = await supabase.from("products").update(productData).eq("id", editingProduct.id));
+      } else {
+        ({ error } = await supabase.from("products").insert(productData));
+      }
+
+      if (error) {
+        toast({ title: "Error", description: error.message, variant: "destructive" });
+        return;
+      }
+
+      toast({ title: "Success", description: `Product ${editingProduct ? "updated" : "created"}` });
+
+      setProductDialogOpen(false);
+      resetProductForm();
+      fetchProducts();
+    } finally {
+      setSaving(false);
     }
-
-    const forcedBranchId = activeBranchId ?? null;
-    const formBranchId = productForm.branch_id || null;
-
-    const branch_id =
-      forcedBranchId ??
-      (editingProduct ? (editingProduct.branch_id ?? null) : formBranchId);
-
-    if (isAdmin && !activeBranchId && !editingProduct && !branch_id) {
-      toast({
-        title: "Branch required",
-        description: "Select a branch for this product (since you’re viewing All branches).",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    const productData: any = {
-      name,
-      sku: productForm.sku.trim() || null,
-      category_id: productForm.category_id || null,
-      unit: productForm.unit,
-      unit_price: Number.parseFloat(productForm.unit_price) || 0,
-      reorder_level: Number.parseInt(productForm.reorder_level) || 10,
-      branch_id,
-    };
-
-    let error: any;
-
-    if (editingProduct) {
-      ({ error } = await supabase.from("products").update(productData).eq("id", editingProduct.id));
-    } else {
-      ({ error } = await supabase.from("products").insert(productData));
-    }
-
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-      return;
-    }
-
-    toast({ title: "Success", description: `Product ${editingProduct ? "updated" : "created"}` });
-
-    setProductDialogOpen(false);
-    resetProductForm();
-    fetchProducts();
   };
 
   const handleDeleteProduct = async (id: string) => {
@@ -300,9 +304,15 @@ export default function Inventory() {
     fetchProducts();
   };
 
-  // ✅ FIXED: Receive Stock now includes branch_id so it always goes to correct branch
+  /**
+   * ✅ FINAL TOUCH:
+   * Receive Stock now:
+   * 1) Inserts into stock_receipts WITH branch_id
+   * 2) Updates products.quantity_in_stock (same product, same branch)
+   */
   const handleReceiveStock = async () => {
     if (!user || !selectedProduct) return;
+    if (saving) return;
 
     const quantity = Number.parseInt(receiptForm.quantity, 10);
     if (!quantity || quantity <= 0) {
@@ -321,47 +331,79 @@ export default function Inventory() {
       return;
     }
 
-    const payload: any = {
-      branch_id: branchIdToUse,
-      product_id: selectedProduct.id,
-      quantity,
-      supplier_name: receiptForm.supplier_name.trim() || null,
-      notes: receiptForm.notes.trim() || null,
-      received_by: user.id,
-    };
+    setSaving(true);
+    try {
+      // 1) Log receipt
+      const receiptPayload: any = {
+        branch_id: branchIdToUse,
+        product_id: selectedProduct.id,
+        quantity,
+        supplier_name: receiptForm.supplier_name.trim() || null,
+        notes: receiptForm.notes.trim() || null,
+        received_by: user.id,
+      };
 
-    const { error } = await supabase.from("stock_receipts").insert(payload);
+      const { error: receiptErr } = await supabase.from("stock_receipts").insert(receiptPayload);
 
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-      return;
+      if (receiptErr) {
+        toast({ title: "Error", description: receiptErr.message, variant: "destructive" });
+        return;
+      }
+
+      // 2) Update product stock (so inventory reflects the receipt)
+      const newStock = Number(selectedProduct.quantity_in_stock || 0) + quantity;
+
+      const { error: stockErr } = await supabase
+        .from("products")
+        .update({ quantity_in_stock: newStock })
+        .eq("id", selectedProduct.id)
+        .eq("branch_id", branchIdToUse); // ✅ prevents cross-branch mistakes
+
+      if (stockErr) {
+        toast({
+          title: "Receipt saved, but stock update failed",
+          description: stockErr.message,
+          variant: "destructive",
+        });
+        return;
+      }
+
+      toast({
+        title: "Stock Received",
+        description: `Added ${quantity} ${selectedProduct.unit}(s). New stock: ${newStock}.`,
+      });
+
+      setReceiptDialogOpen(false);
+      setSelectedProduct(null);
+      setReceiptForm({ quantity: "", supplier_name: "", notes: "" });
+      fetchProducts();
+    } finally {
+      setSaving(false);
     }
-
-    toast({
-      title: "Stock Received",
-      description: `Added ${quantity} ${selectedProduct.unit}(s)`,
-    });
-
-    setReceiptDialogOpen(false);
-    setReceiptForm({ quantity: "", supplier_name: "", notes: "" });
-    fetchProducts();
   };
 
   const handleSaveCategory = async () => {
-    const name = categoryName.trim();
-    if (!name) return;
+    if (saving) return;
+    setSaving(true);
 
-    const { error } = await supabase.from("categories").insert({ name });
+    try {
+      const name = categoryName.trim();
+      if (!name) return;
 
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-      return;
+      const { error } = await supabase.from("categories").insert({ name });
+
+      if (error) {
+        toast({ title: "Error", description: error.message, variant: "destructive" });
+        return;
+      }
+
+      toast({ title: "Category Created" });
+      setCategoryDialogOpen(false);
+      setCategoryName("");
+      fetchCategories();
+    } finally {
+      setSaving(false);
     }
-
-    toast({ title: "Category Created" });
-    setCategoryDialogOpen(false);
-    setCategoryName("");
-    fetchCategories();
   };
 
   const filteredProducts = useMemo(() => {
@@ -385,9 +427,7 @@ export default function Inventory() {
               <>
                 Viewing:{" "}
                 <span className="text-slate-200 font-medium">
-                  {activeBranchId
-                    ? branchNameById.get(activeBranchId) ?? "Selected branch"
-                    : "All branches"}
+                  {activeBranchId ? branchNameById.get(activeBranchId) ?? "Selected branch" : "All branches"}
                 </span>
               </>
             ) : (
@@ -397,12 +437,13 @@ export default function Inventory() {
         </div>
 
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setCategoryDialogOpen(true)}>
+          <Button variant="outline" onClick={() => setCategoryDialogOpen(true)} disabled={saving}>
             <Plus className="h-4 w-4 mr-2" />
             Category
           </Button>
 
           <Button
+            disabled={saving}
             onClick={() => {
               resetProductForm();
               setProductDialogOpen(true);
@@ -432,9 +473,7 @@ export default function Inventory() {
                 <TableHead className="text-slate-400">Product</TableHead>
                 <TableHead className="text-slate-400">SKU</TableHead>
                 <TableHead className="text-slate-400">Category</TableHead>
-
                 {showBranchColumn && <TableHead className="text-slate-400">Branch</TableHead>}
-
                 <TableHead className="text-slate-400">Price (GHS)</TableHead>
                 <TableHead className="text-slate-400">Stock</TableHead>
                 <TableHead className="text-slate-400 text-right">Actions</TableHead>
@@ -450,9 +489,7 @@ export default function Inventory() {
 
                   {showBranchColumn && (
                     <TableCell className="text-slate-300">
-                      {product.branch_id
-                        ? branchNameById.get(product.branch_id) ?? "Unknown"
-                        : "—"}
+                      {product.branch_id ? branchNameById.get(product.branch_id) ?? "Unknown" : "—"}
                     </TableCell>
                   )}
 
@@ -462,11 +499,7 @@ export default function Inventory() {
 
                   <TableCell>
                     <Badge
-                      variant={
-                        product.quantity_in_stock < (product.reorder_level || 10)
-                          ? "destructive"
-                          : "default"
-                      }
+                      variant={product.quantity_in_stock < (product.reorder_level || 10) ? "destructive" : "default"}
                     >
                       {product.quantity_in_stock} {product.unit}
                     </Badge>
@@ -479,16 +512,18 @@ export default function Inventory() {
                         variant="ghost"
                         onClick={() => openReceiveStock(product)}
                         title="Receive Stock"
+                        disabled={saving}
                       >
                         <TrendingUp className="h-4 w-4 text-green-500" />
                       </Button>
-                      <Button size="icon" variant="ghost" onClick={() => openEditProduct(product)}>
+                      <Button size="icon" variant="ghost" onClick={() => openEditProduct(product)} disabled={saving}>
                         <Edit2 className="h-4 w-4" />
                       </Button>
                       <Button
                         size="icon"
                         variant="ghost"
                         onClick={() => handleDeleteProduct(product.id)}
+                        disabled={saving}
                       >
                         <Trash2 className="h-4 w-4 text-red-400" />
                       </Button>
@@ -499,10 +534,7 @@ export default function Inventory() {
 
               {filteredProducts.length === 0 && (
                 <TableRow>
-                  <TableCell
-                    colSpan={showBranchColumn ? 7 : 6}
-                    className="text-center text-slate-400 py-8"
-                  >
+                  <TableCell colSpan={showBranchColumn ? 7 : 6} className="text-center text-slate-400 py-8">
                     {loading ? "Loading..." : "No products found"}
                   </TableCell>
                 </TableRow>
@@ -513,12 +545,16 @@ export default function Inventory() {
       </Card>
 
       {/* Product Dialog */}
-      <Dialog open={productDialogOpen} onOpenChange={setProductDialogOpen}>
+      <Dialog
+        open={productDialogOpen}
+        onOpenChange={(open) => {
+          setProductDialogOpen(open);
+          if (!open) resetProductForm();
+        }}
+      >
         <DialogContent className="bg-slate-800 border-slate-700">
           <DialogHeader>
-            <DialogTitle className="text-white">
-              {editingProduct ? "Edit Product" : "Add Product"}
-            </DialogTitle>
+            <DialogTitle className="text-white">{editingProduct ? "Edit Product" : "Add Product"}</DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
@@ -534,10 +570,7 @@ export default function Inventory() {
             {isAdmin && !activeBranchId && (
               <div>
                 <Label className="text-slate-200">Branch *</Label>
-                <Select
-                  value={productForm.branch_id}
-                  onValueChange={(v) => setProductForm({ ...productForm, branch_id: v })}
-                >
+                <Select value={productForm.branch_id} onValueChange={(v) => setProductForm({ ...productForm, branch_id: v })}>
                   <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
                     <SelectValue placeholder="Select branch" />
                   </SelectTrigger>
@@ -567,10 +600,7 @@ export default function Inventory() {
 
               <div>
                 <Label className="text-slate-200">Category</Label>
-                <Select
-                  value={productForm.category_id}
-                  onValueChange={(v) => setProductForm({ ...productForm, category_id: v })}
-                >
+                <Select value={productForm.category_id} onValueChange={(v) => setProductForm({ ...productForm, category_id: v })}>
                   <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
                     <SelectValue placeholder="Select category" />
                   </SelectTrigger>
@@ -588,10 +618,7 @@ export default function Inventory() {
             <div className="grid grid-cols-3 gap-4">
               <div>
                 <Label className="text-slate-200">Unit</Label>
-                <Select
-                  value={productForm.unit}
-                  onValueChange={(v) => setProductForm({ ...productForm, unit: v })}
-                >
+                <Select value={productForm.unit} onValueChange={(v) => setProductForm({ ...productForm, unit: v })}>
                   <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
                     <SelectValue />
                   </SelectTrigger>
@@ -628,16 +655,27 @@ export default function Inventory() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setProductDialogOpen(false)}>
+            <Button variant="outline" onClick={() => setProductDialogOpen(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={handleSaveProduct}>{editingProduct ? "Update" : "Create"}</Button>
+            <Button onClick={handleSaveProduct} disabled={saving}>
+              {editingProduct ? "Update" : "Create"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Receive Stock Dialog */}
-      <Dialog open={receiptDialogOpen} onOpenChange={setReceiptDialogOpen}>
+      <Dialog
+        open={receiptDialogOpen}
+        onOpenChange={(open) => {
+          setReceiptDialogOpen(open);
+          if (!open) {
+            setSelectedProduct(null);
+            setReceiptForm({ quantity: "", supplier_name: "", notes: "" });
+          }
+        }}
+      >
         <DialogContent className="bg-slate-800 border-slate-700">
           <DialogHeader>
             <DialogTitle className="text-white">Receive Stock - {selectedProduct?.name}</DialogTitle>
@@ -678,10 +716,12 @@ export default function Inventory() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReceiptDialogOpen(false)}>
+            <Button variant="outline" onClick={() => setReceiptDialogOpen(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={handleReceiveStock}>Receive Stock</Button>
+            <Button onClick={handleReceiveStock} disabled={saving}>
+              Receive Stock
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -703,10 +743,12 @@ export default function Inventory() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCategoryDialogOpen(false)}>
+            <Button variant="outline" onClick={() => setCategoryDialogOpen(false)} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={handleSaveCategory}>Create</Button>
+            <Button onClick={handleSaveCategory} disabled={saving}>
+              Create
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
