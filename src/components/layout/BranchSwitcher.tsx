@@ -66,17 +66,23 @@ export function BranchSwitcher() {
     };
   }, [isAdmin, companyId]);
 
-  // ✅ If company changes, reset admin view to All branches + clear cached name
+  // ✅ If activeBranchId is already set (from useAuth localStorage),
+  // ensure we cache its *name* after branches load (so Sidebar can show it instantly).
   useEffect(() => {
     if (!isAdmin) return;
-    setActiveBranchId(null);
+    if (!activeBranchId) return;
+    if (branches.length === 0) return;
+
     try {
-      localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+      const existing = localStorage.getItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+      if (existing?.trim()) return;
+
+      const name = branches.find((b) => b.id === activeBranchId)?.name;
+      if (name) localStorage.setItem(ADMIN_ACTIVE_BRANCH_NAME_KEY, name);
     } catch {
       // ignore
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId]);
+  }, [isAdmin, activeBranchId, branches]);
 
   // ✅ Selected label shown in the dropdown trigger
   const selectedLabel = useMemo(() => {
@@ -119,7 +125,11 @@ export function BranchSwitcher() {
         <SelectContent className="bg-slate-900 border-slate-700">
           <SelectItem value="all">All branches</SelectItem>
 
-          {branches.length === 0 ? (
+          {loading ? (
+            <SelectItem value="__loading" disabled>
+              Loading branches...
+            </SelectItem>
+          ) : branches.length === 0 ? (
             <SelectItem value="__none" disabled>
               No branches found
             </SelectItem>
