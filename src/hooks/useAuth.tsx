@@ -91,6 +91,8 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const ADMIN_ACTIVE_BRANCH_KEY = "admin_active_branch_id";
+const ADMIN_ACTIVE_BRANCH_NAME_KEY = "admin_active_branch_name_v1";
+
 const LOADING_WATCHDOG_MS = 8000;
 
 // ✅ profile cache + retries to prevent “refresh looks like logout”
@@ -550,18 +552,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         kickWatchdog();
         await fetchUserData(uid);
       } else {
-        fetchSeq.current++;
-        lastFetchedUserIdRef.current = null;
-        safeSetProfile(null);
-        safeSetRoles([]);
-        safeSetActiveBranch(null);
-        safeSetBranchName(null);
-        safeSetCompanyName(null);
-        clearCachedProfile();
-        clearCachedCompanyName();
-        safeSetLoading(false);
-        stopWatchdog();
-      }
+  fetchSeq.current++;
+  lastFetchedUserIdRef.current = null;
+
+  safeSetProfile(null);
+  safeSetRoles([]);
+  safeSetActiveBranch(null);
+  safeSetBranchName(null);
+  safeSetCompanyName(null);
+
+  clearCachedProfile();
+  clearCachedCompanyName();
+
+  // ✅ clear admin branch selection + label
+  try {
+    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+  } catch {
+    // ignore
+  }
+
+  safeSetLoading(false);
+  stopWatchdog();
+}
+
     });
 
     (async () => {
@@ -815,12 +829,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const signOut = async () => {
-    clearCachedProfile();
-    clearCachedCompanyName();
-    safeSetCompanyName(null);
-    await supabase.auth.signOut();
-  };
+ const signOut = async () => {
+  clearCachedProfile();
+  clearCachedCompanyName();
+
+  // ✅ clear admin branch selection + label
+  try {
+    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+  } catch {
+    // ignore
+  }
+
+  safeSetCompanyName(null);
+  await supabase.auth.signOut();
+};
+
 
   const hasRole = (role: AppRole) =>
     roles.includes(role) || (role === "admin" && (profile as any)?.is_admin === true);
