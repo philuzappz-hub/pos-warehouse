@@ -1,14 +1,14 @@
-import { useToast } from '@/hooks/use-toast';
-import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/integrations/supabase/client';
-import { useEffect, useMemo, useState } from 'react';
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
+import { useEffect, useMemo, useState } from "react";
 
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
-import { Image as ImageIcon, Plus, Search, Trash2, X } from 'lucide-react';
+import { Image as ImageIcon, Plus, Search, Trash2, X } from "lucide-react";
 
 type ProductLite = {
   id: string;
@@ -16,6 +16,7 @@ type ProductLite = {
   sku: string | null;
   unit: string | null;
   quantity_in_stock: number;
+  branch_id: string | null; // ✅ IMPORTANT: used for safety
 };
 
 type Line = {
@@ -29,12 +30,12 @@ function normalizeWaybillUrls(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
 
-  if (typeof v === 'object') {
+  if (typeof v === "object") {
     if (Array.isArray((v as any).urls)) return (v as any).urls.filter(Boolean).map(String);
     if (Array.isArray((v as any).files)) return (v as any).files.filter(Boolean).map(String);
   }
 
-  if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
   return [];
 }
 
@@ -42,8 +43,8 @@ export default function ReceivedStock() {
   const { toast } = useToast();
   const { user, profile } = useAuth();
 
-  const [carNumber, setCarNumber] = useState('');
-  const [notes, setNotes] = useState('');
+  const [carNumber, setCarNumber] = useState("");
+  const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -54,12 +55,15 @@ export default function ReceivedStock() {
   // -----------------------------
   // Product search (picker)
   // -----------------------------
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<ProductLite[]>([]);
 
   const trimmed = query.trim();
+
+  // ✅ CRITICAL: receipt.branch_id is NOT NULL, and products MUST match this branch
+  const branchId = (profile as any)?.branch_id ?? null;
 
   useEffect(() => {
     let active = true;
@@ -70,13 +74,21 @@ export default function ReceivedStock() {
         return;
       }
 
+      // ✅ If staff has no branch, block search so they can’t pick wrong products
+      if (!branchId) {
+        setResults([]);
+        return;
+      }
+
       setSearching(true);
 
+      // ✅ FIX: Only search products in THIS branch
       const { data, error } = await supabase
-        .from('products')
-        .select('id, name, sku, unit, quantity_in_stock')
+        .from("products")
+        .select("id, name, sku, unit, quantity_in_stock, branch_id")
+        .eq("branch_id", branchId)
         .or(`name.ilike.%${trimmed}%,sku.ilike.%${trimmed}%`)
-        .order('name')
+        .order("name")
         .limit(10);
 
       if (!active) return;
@@ -90,11 +102,31 @@ export default function ReceivedStock() {
       active = false;
       clearTimeout(t);
     };
-  }, [trimmed]);
+  }, [trimmed, branchId]);
 
   const showDropdown = open && (searching || results.length > 0 || trimmed.length >= 2);
 
   const addProductLine = (p: ProductLite) => {
+    // ✅ Extra safety: never allow cross-branch product into this receipt
+    if (!branchId) {
+      toast({
+        title: "No branch assigned",
+        description: "Your account must be assigned to a branch before receiving stock.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!p.branch_id || p.branch_id !== branchId) {
+      toast({
+        title: "Branch mismatch blocked",
+        description:
+          "This product belongs to a different branch. Please choose a product from your branch only.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLines((prev) => {
       const existing = prev.find((x) => x.product.id === p.id);
       if (existing) {
@@ -105,7 +137,7 @@ export default function ReceivedStock() {
       return [...prev, { product: p, qty: 1 }];
     });
 
-    setQuery('');
+    setQuery("");
     setOpen(false);
   };
 
@@ -129,17 +161,16 @@ export default function ReceivedStock() {
   const onPickWaybills = (files: FileList | null) => {
     if (!files) return;
 
-    const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (list.length === 0) {
       toast({
-        title: 'Invalid files',
-        description: 'Please select image files only.',
-        variant: 'destructive',
+        title: "Invalid files",
+        description: "Please select image files only.",
+        variant: "destructive",
       });
       return;
     }
 
-    // safety limits
     const MAX_FILES = 6;
     const MAX_MB_EACH = 8;
 
@@ -149,9 +180,9 @@ export default function ReceivedStock() {
 
     if (filtered.length !== list.slice(0, MAX_FILES).length) {
       toast({
-        title: 'Some files skipped',
+        title: "Some files skipped",
         description: `Max ${MAX_FILES} images, and each must be <= ${MAX_MB_EACH}MB.`,
-        variant: 'destructive',
+        variant: "destructive",
       });
     }
 
@@ -181,15 +212,17 @@ export default function ReceivedStock() {
 
     for (const file of waybillFiles) {
       try {
-        const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-        const safeExt = ['jpg', 'jpeg', 'png', 'webp'].includes(ext) ? ext : 'jpg';
+        const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+        const safeExt = ["jpg", "jpeg", "png", "webp"].includes(ext) ? ext : "jpg";
 
-        const path = `${receiptId}/${user.id}/${Date.now()}-${Math.random().toString(16).slice(2)}.${safeExt}`;
+        const path = `${receiptId}/${user.id}/${Date.now()}-${Math.random()
+          .toString(16)
+          .slice(2)}.${safeExt}`;
 
-        const { error: upErr } = await supabase.storage.from('waybills').upload(path, file, {
-          cacheControl: '3600',
+        const { error: upErr } = await supabase.storage.from("waybills").upload(path, file, {
+          cacheControl: "3600",
           upsert: false,
-          contentType: file.type || 'image/jpeg',
+          contentType: file.type || "image/jpeg",
         });
 
         if (upErr) throw upErr;
@@ -201,20 +234,19 @@ export default function ReceivedStock() {
     }
 
     if (paths.length > 0) {
-      // ✅ Merge with any existing waybill_urls (jsonb)
       const { data: currentRow } = await supabase
-        .from('warehouse_receipts' as any)
-        .select('waybill_urls')
-        .eq('id', receiptId)
+        .from("warehouse_receipts" as any)
+        .select("waybill_urls")
+        .eq("id", receiptId)
         .maybeSingle();
 
       const existing = normalizeWaybillUrls((currentRow as any)?.waybill_urls);
       const merged = [...existing, ...paths];
 
       const { error: updateErr } = await supabase
-        .from('warehouse_receipts' as any)
-        .update({ waybill_urls: merged }) // ✅ jsonb array
-        .eq('id', receiptId);
+        .from("warehouse_receipts" as any)
+        .update({ waybill_urls: merged })
+        .eq("id", receiptId);
 
       if (updateErr) {
         failed += 1;
@@ -229,35 +261,44 @@ export default function ReceivedStock() {
   // -----------------------------
   const saveDraft = async () => {
     if (!user) {
-      toast({ title: 'Not logged in', description: 'Please login again.', variant: 'destructive' });
+      toast({ title: "Not logged in", description: "Please login again.", variant: "destructive" });
       return;
     }
 
-    // ✅ CRITICAL: receipt.branch_id is NOT NULL
-    const branchId = profile?.branch_id ?? null;
     if (!branchId) {
       toast({
-        title: 'No branch assigned',
-        description: 'Your account must be assigned to a branch before you can receive stock.',
-        variant: 'destructive',
+        title: "No branch assigned",
+        description: "Your account must be assigned to a branch before you can receive stock.",
+        variant: "destructive",
       });
       return;
     }
 
     if (!carNumber.trim()) {
       toast({
-        title: 'Car number required',
-        description: 'Please enter a car number before saving.',
-        variant: 'destructive',
+        title: "Car number required",
+        description: "Please enter a car number before saving.",
+        variant: "destructive",
       });
       return;
     }
 
     if (lines.length === 0) {
       toast({
-        title: 'No products',
-        description: 'Please add at least one product.',
-        variant: 'destructive',
+        title: "No products",
+        description: "Please add at least one product.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // ✅ Safety: enforce all picked products match receipt branch
+    const wrong = lines.find((l) => !l.product.branch_id || l.product.branch_id !== branchId);
+    if (wrong) {
+      toast({
+        title: "Branch mismatch blocked",
+        description: `One product does not belong to your branch: ${wrong.product.name}`,
+        variant: "destructive",
       });
       return;
     }
@@ -265,9 +306,9 @@ export default function ReceivedStock() {
     const bad = lines.find((l) => !l.qty || Number(l.qty) <= 0);
     if (bad) {
       toast({
-        title: 'Invalid quantity',
+        title: "Invalid quantity",
         description: `Quantity must be greater than 0 for: ${bad.product.name}`,
-        variant: 'destructive',
+        variant: "destructive",
       });
       return;
     }
@@ -277,32 +318,31 @@ export default function ReceivedStock() {
     let receiptId: string | null = null;
 
     try {
-      // ✅ DB expects a DATE, not timestamp
       const todayISO = new Date().toISOString().slice(0, 10);
 
-      // 1) Create receipt header (MUST include branch_id)
+      // 1) Create receipt header
       const { data: receiptData, error: receiptError } = await supabase
-        .from('warehouse_receipts' as any)
+        .from("warehouse_receipts" as any)
         .insert({
           car_number: carNumber.trim(),
           receipt_date: todayISO,
           notes: notes.trim() ? notes.trim() : null,
           created_by: user.id,
-          status: 'pending',
-          branch_id: branchId, // ✅ FIXED
-          waybill_urls: waybillFiles.length > 0 ? [] : null, // jsonb
+          status: "pending",
+          branch_id: branchId,
+          waybill_urls: waybillFiles.length > 0 ? [] : null,
         })
-        .select('id')
+        .select("id")
         .single();
 
       if (receiptError) {
-        const msg = (receiptError.message || '').toLowerCase();
-        if (msg.includes('duplicate') || msg.includes('unique')) {
+        const msg = (receiptError.message || "").toLowerCase();
+        if (msg.includes("duplicate") || msg.includes("unique")) {
           toast({
-            title: 'Duplicate entry blocked',
+            title: "Duplicate entry blocked",
             description:
-              'This car number has already been captured today. If this is a different delivery, use a different car number.',
-            variant: 'destructive',
+              "This car number has already been captured today. If this is a different delivery, use a different car number.",
+            variant: "destructive",
           });
           return;
         }
@@ -317,15 +357,17 @@ export default function ReceivedStock() {
         receipt_id: receiptId,
         product_id: l.product.id,
         quantity: Number(l.qty),
+        // branch_id is nullable on table, but we can include it if you want:
+        // branch_id: branchId,
       }));
 
       const { error: itemsError } = await supabase
-        .from('warehouse_receipt_items' as any)
+        .from("warehouse_receipt_items" as any)
         .insert(itemsPayload);
 
       if (itemsError) throw itemsError;
 
-      // 3) Upload optional waybills (BEST-EFFORT; never blocks saving)
+      // 3) Upload optional waybills (best-effort)
       let uploadInfo = { paths: [] as string[], failed: 0 };
       if (waybillFiles.length > 0) {
         uploadInfo = await uploadWaybills(receiptId);
@@ -333,41 +375,40 @@ export default function ReceivedStock() {
 
       if (waybillFiles.length > 0 && uploadInfo.paths.length === 0) {
         toast({
-          title: 'Saved ✅ (no waybill uploaded)',
+          title: "Saved ✅ (no waybill uploaded)",
           description:
-            'Receipt saved as Pending, but waybill upload failed. Check bucket permissions or file size/type.',
-          variant: 'destructive',
+            "Receipt saved as Pending, but waybill upload failed. Check bucket permissions or file size/type.",
+          variant: "destructive",
         });
       } else {
         toast({
-          title: 'Saved ✅',
+          title: "Saved ✅",
           description:
             waybillFiles.length > 0
               ? `Receipt saved (Pending). Waybills: ${uploadInfo.paths.length} uploaded${
-                  uploadInfo.failed ? `, ${uploadInfo.failed} failed` : ''
+                  uploadInfo.failed ? `, ${uploadInfo.failed} failed` : ""
                 }.`
-              : 'Receipt saved (Pending). Admin must approve before stock increases.',
+              : "Receipt saved (Pending). Admin must approve before stock increases.",
         });
       }
 
       // Reset
-      setCarNumber('');
-      setNotes('');
+      setCarNumber("");
+      setNotes("");
       setLines([]);
-      setQuery('');
+      setQuery("");
       setOpen(false);
       setWaybillFiles([]);
       setWaybillPreviews([]);
     } catch (e: any) {
-      // Cleanup receipt only if items insert failed (receipt alone is useless)
       if (receiptId) {
-        await supabase.from('warehouse_receipts' as any).delete().eq('id', receiptId);
+        await supabase.from("warehouse_receipts" as any).delete().eq("id", receiptId);
       }
 
       toast({
-        title: 'Save failed',
-        description: e?.message || 'Could not save receiving draft',
-        variant: 'destructive',
+        title: "Save failed",
+        description: e?.message || "Could not save receiving draft",
+        variant: "destructive",
       });
     } finally {
       setSaving(false);
@@ -403,7 +444,7 @@ export default function ReceivedStock() {
           <div>
             <Label className="text-slate-300">Received By</Label>
             <Input
-              value={profile?.full_name || 'Unknown'}
+              value={profile?.full_name || "Unknown"}
               disabled
               className="bg-slate-900 border-slate-700 text-slate-300"
             />
@@ -423,6 +464,12 @@ export default function ReceivedStock() {
               className="bg-slate-800 border-slate-700 text-white"
             />
           </div>
+
+          {!branchId && (
+            <div className="md:col-span-3 text-sm text-red-300">
+              ⚠️ Your account has no branch_id. Receiving is disabled until admin assigns a branch.
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -490,7 +537,12 @@ export default function ReceivedStock() {
                 onChange={(e) => setQuery(e.target.value)}
                 onFocus={() => setOpen(true)}
                 onBlur={() => setTimeout(() => setOpen(false), 150)}
-                placeholder="Search product by name or SKU (min 2 letters)…"
+                placeholder={
+                  branchId
+                    ? "Search product by name or SKU (min 2 letters)…"
+                    : "Branch not assigned — cannot search products"
+                }
+                disabled={!branchId}
                 className="pl-10 bg-slate-800 border-slate-700 text-white"
               />
             </div>
@@ -502,7 +554,7 @@ export default function ReceivedStock() {
 
                   {!searching && results.length === 0 && trimmed.length >= 2 && (
                     <div className="px-3 py-2 text-sm text-slate-400">
-                      No matches. Try another name or SKU.
+                      No matches in your branch. Try another name or SKU.
                     </div>
                   )}
 
@@ -516,7 +568,7 @@ export default function ReceivedStock() {
                     >
                       <div className="text-sm text-white font-medium">{p.name}</div>
                       <div className="text-xs text-slate-400">
-                        SKU: {p.sku || '-'} • Unit: {p.unit || '-'} • Current Stock:{' '}
+                        SKU: {p.sku || "-"} • Unit: {p.unit || "-"} • Current Stock:{" "}
                         {Number(p.quantity_in_stock || 0).toLocaleString()}
                       </div>
                     </button>
@@ -538,7 +590,7 @@ export default function ReceivedStock() {
                   <div className="flex-1 min-w-0">
                     <div className="text-white font-medium truncate">{l.product.name}</div>
                     <div className="text-xs text-slate-400">
-                      SKU: {l.product.sku || '-'} • Unit: {l.product.unit || '-'}
+                      SKU: {l.product.sku || "-"} • Unit: {l.product.unit || "-"}
                     </div>
                   </div>
 
@@ -571,13 +623,13 @@ export default function ReceivedStock() {
 
           <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="text-sm text-slate-400">
-              Lines: <b className="text-white">{lines.length}</b> • Total Qty:{' '}
+              Lines: <b className="text-white">{lines.length}</b> • Total Qty:{" "}
               <b className="text-white">{Number(totalQty).toLocaleString()}</b>
             </div>
 
-            <Button onClick={saveDraft} disabled={saving}>
+            <Button onClick={saveDraft} disabled={saving || !branchId}>
               <Plus className="h-4 w-4 mr-2" />
-              {saving ? 'Saving...' : 'Save Draft (Pending)'}
+              {saving ? "Saving..." : "Save Draft (Pending)"}
             </Button>
           </div>
         </CardContent>
