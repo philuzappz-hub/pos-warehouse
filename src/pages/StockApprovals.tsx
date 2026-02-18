@@ -89,7 +89,14 @@ type AuditRow = {
   created_at: string;
 };
 
-type BranchMini = { id: string; name: string };
+// ✅ UPDATED: include branch address/contact for branch-specific header
+type BranchMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+};
 
 type CompanyMini = {
   id: string;
@@ -271,11 +278,44 @@ function drawWatermark(doc: jsPDF, text: string) {
   } catch {}
 }
 
+// ✅ NEW: Contact parts based on branch/all selection (Option B)
+function getHeaderContactParts(
+  company: CompanyMini | null,
+  branch: BranchMini | null,
+  mode: "all" | "branch"
+) {
+  const address =
+    mode === "branch"
+      ? (branch?.address?.trim() || company?.address?.trim() || "")
+      : (company?.address?.trim() || "");
+
+  const phone =
+    mode === "branch"
+      ? (branch?.phone?.trim() || company?.phone?.trim() || "")
+      : (company?.phone?.trim() || "");
+
+  const email =
+    mode === "branch"
+      ? (branch?.email?.trim() || company?.email?.trim() || "")
+      : (company?.email?.trim() || "");
+
+  const parts = [
+    address || null,
+    phone ? `Tel: ${phone}` : null,
+    email || null,
+    company?.tax_id?.trim() ? `Tax ID: ${company.tax_id.trim()}` : null,
+  ].filter(Boolean) as string[];
+
+  return parts;
+}
+
+// ✅ UPDATED: accepts contactParts and wraps lines to avoid overlap
 function drawCompanyHeader(
   doc: jsPDF,
   company: CompanyMini | null,
   titleRight: string,
-  status: ReceiptStatus
+  status: ReceiptStatus,
+  contactParts: string[]
 ) {
   const companyName = company?.name || "Company";
   const initials = getInitials(companyName);
@@ -292,19 +332,12 @@ function drawCompanyHeader(
   doc.setFontSize(15);
   doc.text(`${companyName} — ${titleRight}`, 80, 44);
 
-  // contacts
-  const contactParts = [
-    company?.address?.trim() ? company.address.trim() : null,
-    company?.phone?.trim() ? `Tel: ${company.phone.trim()}` : null,
-    company?.email?.trim() ? company.email.trim() : null,
-    company?.tax_id?.trim() ? `Tax ID: ${company.tax_id.trim()}` : null,
-  ].filter(Boolean) as string[];
-
+  // contacts (wrapped)
   doc.setFontSize(9.5);
   doc.setTextColor(71, 85, 105);
-  doc.text(contactParts.length ? contactParts.join(" • ") : "—", 80, 60, {
-    maxWidth: 380,
-  });
+  const line = contactParts.length ? contactParts.join(" • ") : "—";
+  const wrapped = doc.splitTextToSize(line, 380);
+  doc.text(wrapped, 80, 60);
 
   // status chip
   const statusText = safeUpper(status);
@@ -318,9 +351,9 @@ function drawCompanyHeader(
   doc.setFontSize(10);
   doc.text(statusText, 500, 45, { align: "center" });
 
-  // divider
+  // divider (moved down a bit)
   doc.setDrawColor(226, 232, 240);
-  doc.line(40, 74, 555, 74);
+  doc.line(40, 86, 555, 86);
 }
 
 export default function StockApprovals() {
@@ -336,7 +369,10 @@ export default function StockApprovals() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
-  const [branchNameMap, setBranchNameMap] = useState<Map<string, string>>(new Map());
+
+  // ✅ UPDATED: full branch map (name + address + phone + email)
+  const [branchMap, setBranchMap] = useState<Map<string, BranchMini>>(new Map());
+
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [auditMap, setAuditMap] = useState<Map<string, AuditRow[]>>(new Map());
 
@@ -411,7 +447,7 @@ export default function StockApprovals() {
 
   const getBranchLabel = (branchId?: string | null) => {
     if (!branchId) return "—";
-    return branchNameMap.get(branchId) || branchId;
+    return branchMap.get(branchId)?.name || branchId;
   };
 
   const fetchCompany = async () => {
@@ -440,28 +476,29 @@ export default function StockApprovals() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [(profile as any)?.company_id]);
 
+  // ✅ UPDATED: now fetches address/phone/email too
   const fetchBranchNamesForReceipts = async (rows: ReceiptRow[]) => {
     try {
       if (!isAdmin) return;
 
       const ids = Array.from(new Set(rows.map((r) => r.branch_id).filter(Boolean) as string[]));
       if (ids.length === 0) {
-        setBranchNameMap(new Map());
+        setBranchMap(new Map());
         return;
       }
 
       const companyId = (profile as any)?.company_id ?? null;
-      let q = sb.from("branches").select("id,name").in("id", ids);
+      let q = sb.from("branches").select("id,name,address,phone,email").in("id", ids);
       if (companyId) q = q.eq("company_id", companyId);
 
       const { data, error } = await q;
       if (error) throw error;
 
-      const m = new Map<string, string>();
-      (data as BranchMini[] | null)?.forEach((b) => m.set(b.id, b.name));
-      setBranchNameMap(m);
+      const m = new Map<string, BranchMini>();
+      (data as BranchMini[] | null)?.forEach((b) => m.set(b.id, b));
+      setBranchMap(m);
     } catch {
-      setBranchNameMap(new Map());
+      setBranchMap(new Map());
     }
   };
 
@@ -513,7 +550,7 @@ export default function StockApprovals() {
       setReceipts(rows);
 
       if (isAdmin) fetchBranchNamesForReceipts(rows).catch(() => {});
-      else setBranchNameMap(new Map());
+      else setBranchMap(new Map());
 
       const ids = new Set<string>();
       rows.forEach((r) => {
@@ -542,7 +579,7 @@ export default function StockApprovals() {
       });
       setReceipts([]);
       setUserNameMap(new Map());
-      setBranchNameMap(new Map());
+      setBranchMap(new Map());
     } finally {
       setLoading(false);
     }
@@ -649,7 +686,7 @@ export default function StockApprovals() {
       return car.includes(s) || notes.includes(s) || creator.includes(s) || itemsText.includes(s) || branchText.includes(s);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receipts, search, userNameMap, branchNameMap]);
+  }, [receipts, search, userNameMap, branchMap]);
 
   const totals = useMemo(() => {
     const receiptCount = filtered.length;
@@ -770,7 +807,7 @@ export default function StockApprovals() {
   };
 
   // -----------------------------
-  // ✅ PDF EXPORTS (A–E applied)
+  // ✅ PDF EXPORTS (A–E + Branch-specific header Option B)
   // -----------------------------
   const exportReceiptPdf = async (r: ReceiptRow, includeAudit: boolean) => {
     let audit = auditMap.get(r.id) || [];
@@ -798,15 +835,19 @@ export default function StockApprovals() {
     const wm = r.status === "pending" ? "DRAFT" : "ADMIN COPY";
     drawWatermark(doc, wm);
 
+    // ✅ Branch-specific contact for single receipt export
+    const receiptBranch = r.branch_id ? branchMap.get(r.branch_id) || null : null;
+    const contactParts = getHeaderContactParts(company, receiptBranch, "branch");
+
     // (A) header
-    drawCompanyHeader(doc, company, "Stock Receipt", r.status);
+    drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
 
     // (D) receipt no + generated
     const receiptNo = receiptNumber("SR", r.created_at, r.id);
     doc.setFontSize(9);
     doc.setTextColor(71, 85, 105);
-    doc.text(`Receipt No: ${receiptNo}`, 40, 92);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 320, 92);
+    doc.text(`Receipt No: ${receiptNo}`, 40, 102);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, 320, 102);
 
     const createdByName = userNameMap.get(r.created_by) || "Unknown";
     const createdByLabel = formatUserLabel(createdByName, r.created_by);
@@ -826,7 +867,7 @@ export default function StockApprovals() {
 
     const leftX = 40;
     const rightX = 320;
-    let y = 118;
+    let y = 128;
 
     doc.text(`Branch: ${branchText}`, leftX, y);
     doc.text(`Car Number: ${r.car_number}`, leftX, y + 16);
@@ -841,17 +882,17 @@ export default function StockApprovals() {
     }
 
     if (r.status === "approved") {
-      doc.text(`Approved By: ${approvedByLabel}`, rightX, 118);
-      doc.text(`Approved At: ${fmtDate(r.approved_at)}`, rightX, 134);
+      doc.text(`Approved By: ${approvedByLabel}`, rightX, 128);
+      doc.text(`Approved At: ${fmtDate(r.approved_at)}`, rightX, 144);
     } else if (r.status === "rejected") {
-      doc.text(`Rejected By: ${rejectedByLabel}`, rightX, 118);
-      doc.text(`Rejected At: ${fmtDate(r.rejected_at)}`, rightX, 134);
+      doc.text(`Rejected By: ${rejectedByLabel}`, rightX, 128);
+      doc.text(`Rejected At: ${fmtDate(r.rejected_at)}`, rightX, 144);
       doc.setTextColor(185, 28, 28);
-      doc.text(`Reason: ${r.rejection_reason || "—"}`, rightX, 150, { maxWidth: 240 });
+      doc.text(`Reason: ${r.rejection_reason || "—"}`, rightX, 160, { maxWidth: 240 });
       doc.setTextColor(15, 23, 42);
     } else {
       doc.setTextColor(71, 85, 105);
-      doc.text(`Pending approval`, rightX, 118);
+      doc.text(`Pending approval`, rightX, 128);
       doc.setTextColor(15, 23, 42);
     }
 
@@ -873,7 +914,7 @@ export default function StockApprovals() {
     });
 
     autoTable(doc, {
-      startY: 200,
+      startY: 210,
       head: [["Product", "SKU", "Unit", "Qty Received", "Current Stock", "After Approval"]],
       body: body.length ? body : [["—", "—", "—", "—", "—", "—"]],
       styles: { fontSize: 9, cellPadding: 4 },
@@ -886,7 +927,7 @@ export default function StockApprovals() {
       },
     });
 
-    y = (doc as any).lastAutoTable?.finalY || 260;
+    y = (doc as any).lastAutoTable?.finalY || 270;
 
     // Waybill embed preview (up to 2)
     const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
@@ -1024,8 +1065,14 @@ export default function StockApprovals() {
     // (E) watermark for exports
     drawWatermark(doc, "ADMIN COPY");
 
+    // ✅ Option B logic:
+    // - if branch selected -> show ONLY that branch address/contact (fallback to company)
+    // - if all branches -> show full company address/contact
+    const selectedBranch = activeBranchId ? branchMap.get(activeBranchId) || null : null;
+    const contactParts = getHeaderContactParts(company, selectedBranch, activeBranchId ? "branch" : "all");
+
     // (A) header
-    drawCompanyHeader(doc, company, "Stock Receipts Export", tab);
+    drawCompanyHeader(doc, company, "Stock Receipts Export", tab, contactParts);
 
     doc.setFontSize(10);
     doc.setTextColor(71, 85, 105);
@@ -1034,7 +1081,7 @@ export default function StockApprovals() {
         isAdmin ? (activeBranchId ? getBranchLabel(activeBranchId) : "All branches") : "—"
       } • Exported: ${new Date().toLocaleString()}`,
       40,
-      98
+      112
     );
 
     const includeBranchCol = isAdmin && !activeBranchId;
@@ -1063,7 +1110,7 @@ export default function StockApprovals() {
       : [["Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]];
 
     autoTable(doc, {
-      startY: 120,
+      startY: 134,
       head,
       body,
       styles: { fontSize: 9 },
