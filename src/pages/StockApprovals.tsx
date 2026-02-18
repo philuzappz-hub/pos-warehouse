@@ -1578,5 +1578,3 @@ export default function StockApprovals() {
     </div>
   );
 }
-
-// DEPLOY TEST: 18/02/2026 20:04:23.21
