@@ -48,18 +48,13 @@ type ReceiptRow = {
   created_at: string;
   created_by: string;
 
-  // ✅ include branch_id so we can print branch name on PDFs
-  branch_id?: string | null;
-
   approved_at?: string | null;
   approved_by?: string | null;
   rejected_at?: string | null;
   rejected_by?: string | null;
   rejection_reason?: string | null;
 
-  // ✅ Waybill URLs stored in jsonb (paths or other json)
   waybill_urls?: any;
-
   items?: ReceiptItem[];
 };
 
@@ -69,12 +64,10 @@ type CompanyMini = {
   address: string | null;
   phone: string | null;
   email: string | null;
-  logo_url: string | null;
   tax_id: string | null;
   receipt_footer: string | null;
+  logo_url: string | null;
 };
-
-type BranchMini = { id: string; name: string };
 
 function formatDate(d?: string | null) {
   if (!d) return '-';
@@ -89,14 +82,12 @@ function statusLabel(s: ReceiptStatus) {
   return 'REJECTED';
 }
 
-// Used only inside PDF colors
 function statusColor(s: ReceiptStatus): [number, number, number] {
-  if (s === 'pending') return [245, 158, 11]; // amber
-  if (s === 'approved') return [34, 197, 94]; // green
-  return [239, 68, 68]; // red
+  if (s === 'pending') return [245, 158, 11];
+  if (s === 'approved') return [34, 197, 94];
+  return [239, 68, 68];
 }
 
-// ✅ Forces browser download (no new tab)
 function forceDownloadPdf(doc: jsPDF, filename: string) {
   const blob = doc.output('blob');
   const url = URL.createObjectURL(blob);
@@ -111,38 +102,28 @@ function forceDownloadPdf(doc: jsPDF, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// ✅ Your waybill_urls is jsonb; normalize to string[]
 function normalizeWaybillUrls(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
 
-  // sometimes jsonb might be { urls: [...] }
   if (typeof v === 'object') {
     if (Array.isArray(v.urls)) return v.urls.filter(Boolean).map(String);
     if (Array.isArray(v.files)) return v.files.filter(Boolean).map(String);
   }
 
-  // sometimes stored as a single string
   if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
   return [];
 }
 
-/**
- * ✅ If DB stored full public URL, convert to storage path.
- * Supabase createSignedUrl expects a bucket-relative path: "<receiptId>/<file>.jpg"
- */
 function extractWaybillPath(urlOrPath: string): string {
   const s = (urlOrPath || '').trim();
   if (!s) return '';
 
-  // already a path like "abc/123.jpg"
   if (!s.startsWith('http')) return s;
 
-  // Try to extract after "/waybills/"
   const idx = s.toLowerCase().indexOf('/waybills/');
   if (idx >= 0) return s.slice(idx + '/waybills/'.length);
 
-  // Try to extract after "/object/" then "waybills/"
   const idx2 = s.toLowerCase().indexOf('/object/');
   if (idx2 >= 0) {
     const after = s.slice(idx2 + '/object/'.length);
@@ -160,7 +141,6 @@ function isLikelyImageUrl(u: string) {
   return s.includes('.png') || s.includes('.jpg') || s.includes('.jpeg') || s.includes('.webp') || s.includes('image');
 }
 
-// ✅ Convert an image URL to dataUrl so jsPDF can embed it
 async function imageUrlToDataUrl(
   url: string
 ): Promise<{ dataUrl: string; format: 'PNG' | 'JPEG'; width: number; height: number } | null> {
@@ -172,18 +152,15 @@ async function imageUrlToDataUrl(
     const mime = (blob.type || '').toLowerCase();
     const format: 'PNG' | 'JPEG' = mime.includes('png') || url.toLowerCase().includes('.png') ? 'PNG' : 'JPEG';
 
-    // get dimensions
     let width = 0;
     let height = 0;
 
     try {
-      // modern browsers
       const bmp = await createImageBitmap(blob);
       width = bmp.width;
       height = bmp.height;
       bmp.close?.();
     } catch {
-      // fallback via HTMLImageElement
       const objUrl = URL.createObjectURL(blob);
       try {
         await new Promise<void>((resolve, reject) => {
@@ -214,6 +191,71 @@ async function imageUrlToDataUrl(
   }
 }
 
+function getInitials(name: string) {
+  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'CO';
+  const first = parts[0]?.[0] || '';
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : parts[0]?.[1] || '';
+  return (first + last).toUpperCase() || 'CO';
+}
+
+function receiptNumber(prefix: string, createdAt: string, id: string) {
+  const d = new Date(createdAt);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const short = (id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
+  return `${prefix}-${yyyy}-${mm}${dd}-${short}`;
+}
+
+function drawWatermark(doc: jsPDF, text: string) {
+  const w = doc.internal.pageSize.getWidth();
+  const h = doc.internal.pageSize.getHeight();
+
+  doc.saveGraphicsState?.();
+  try {
+    (doc as any).setGState?.(new (doc as any).GState({ opacity: 0.08 }));
+  } catch {}
+
+  doc.setTextColor(2, 6, 23);
+  doc.setFontSize(56);
+  doc.text(text, w / 2, h / 2, { align: 'center', angle: 35 });
+
+  try {
+    (doc as any).setGState?.(new (doc as any).GState({ opacity: 1 }));
+  } catch {}
+  doc.restoreGraphicsState?.();
+}
+
+function drawCompanyHeader(doc: jsPDF, company: CompanyMini | null, titleRight: string) {
+  const companyName = company?.name || 'Company';
+  const initials = getInitials(companyName);
+
+  doc.setFillColor(30, 41, 59);
+  doc.circle(54, 44, 16, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(12);
+  doc.text(initials, 54, 48, { align: 'center' });
+
+  doc.setTextColor(15, 23, 42);
+  doc.setFontSize(15);
+  doc.text(`${companyName} — ${titleRight}`, 80, 44);
+
+  const contactParts = [
+    company?.address?.trim() ? company.address.trim() : null,
+    company?.phone?.trim() ? `Tel: ${company.phone.trim()}` : null,
+    company?.email?.trim() ? company.email.trim() : null,
+    company?.tax_id?.trim() ? `Tax ID: ${company.tax_id.trim()}` : null,
+  ].filter(Boolean) as string[];
+
+  doc.setFontSize(9.5);
+  doc.setTextColor(71, 85, 105);
+  doc.text(contactParts.length ? contactParts.join(' • ') : '—', 80, 60, { maxWidth: 380 });
+
+  doc.setDrawColor(226, 232, 240);
+  doc.line(40, 74, 555, 74);
+}
+
 export default function MyReceipts() {
   const { toast } = useToast();
   const { user, profile } = useAuth();
@@ -224,16 +266,33 @@ export default function MyReceipts() {
   const [rows, setRows] = useState<ReceiptRow[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  // map user_id -> full_name (for admin approver/rejector)
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
 
-  // ✅ company details (for PDFs)
   const [company, setCompany] = useState<CompanyMini | null>(null);
 
-  // ✅ branch name map (for PDFs)
-  const [branchNameMap, setBranchNameMap] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    const companyId = (profile as any)?.company_id ?? null;
+    if (!companyId) {
+      setCompany(null);
+      return;
+    }
 
-  // ✅ per-receipt pdf export state
+    (async () => {
+      try {
+        const { data, error } = await (supabase as any)
+          .from('companies')
+          .select('id,name,address,phone,email,tax_id,receipt_footer,logo_url')
+          .eq('id', companyId)
+          .maybeSingle();
+
+        if (error) throw error;
+        setCompany((data as CompanyMini) || null);
+      } catch {
+        setCompany(null);
+      }
+    })();
+  }, [(profile as any)?.company_id]);
+
   const [exportingIds, setExportingIds] = useState<Set<string>>(new Set());
   const setExporting = (id: string, on: boolean) => {
     setExportingIds((prev) => {
@@ -244,7 +303,6 @@ export default function MyReceipts() {
     });
   };
 
-  // ✅ Waybill preview dialog state
   const [waybillOpen, setWaybillOpen] = useState(false);
   const [waybillActiveReceiptId, setWaybillActiveReceiptId] = useState<string | null>(null);
   const [waybillActiveUrls, setWaybillActiveUrls] = useState<string[]>([]);
@@ -259,7 +317,6 @@ export default function MyReceipts() {
     setWaybillSigning(false);
   };
 
-  // ✅ Create signed URLs for private bucket "waybills"
   const getSignedWaybillUrls = async (r: ReceiptRow, expiresSec = 3600) => {
     const raw = normalizeWaybillUrls(r.waybill_urls);
     if (raw.length === 0) return [];
@@ -316,60 +373,6 @@ export default function MyReceipts() {
     }
   };
 
-  // ✅ helper: branch label
-  const getBranchLabel = (branchId?: string | null) => {
-    if (!branchId) return '—';
-    return branchNameMap.get(branchId) || branchId;
-  };
-
-  // ✅ load company details for PDF header
-  const fetchCompany = async () => {
-    const companyId = (profile as any)?.company_id || null;
-    if (!companyId) {
-      setCompany(null);
-      return;
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('companies')
-        .select('id,name,address,phone,email,logo_url,tax_id,receipt_footer')
-        .eq('id', companyId)
-        .single();
-
-      if (error) throw error;
-      setCompany((data as any) as CompanyMini);
-    } catch {
-      // non-blocking
-      setCompany(null);
-    }
-  };
-
-  // ✅ load branch names for receipts
-  const fetchBranchNamesForRows = async (list: ReceiptRow[]) => {
-    try {
-      const companyId = (profile as any)?.company_id || null;
-
-      const ids = Array.from(new Set(list.map((r) => r.branch_id).filter(Boolean) as string[]));
-      if (ids.length === 0) {
-        setBranchNameMap(new Map());
-        return;
-      }
-
-      let q = supabase.from('branches').select('id,name').in('id', ids);
-      if (companyId) q = q.eq('company_id', companyId);
-
-      const { data, error } = await q;
-      if (error) throw error;
-
-      const m = new Map<string, string>();
-      (data as BranchMini[] | null)?.forEach((b) => m.set(b.id, b.name));
-      setBranchNameMap(m);
-    } catch {
-      setBranchNameMap(new Map());
-    }
-  };
-
   const fetchMine = async () => {
     if (!user) return;
 
@@ -385,7 +388,6 @@ export default function MyReceipts() {
             status,
             created_at,
             created_by,
-            branch_id,
             approved_at,
             approved_by,
             rejected_at,
@@ -410,10 +412,6 @@ export default function MyReceipts() {
       const list = (data ?? []) as unknown as ReceiptRow[];
       setRows(list);
 
-      // ✅ load branch names (for PDF)
-      fetchBranchNamesForRows(list).catch(() => {});
-
-      // Build name map for approvers/rejectors
       const ids = new Set<string>();
       list.forEach((r) => {
         if (r.approved_by) ids.add(String(r.approved_by));
@@ -430,12 +428,8 @@ export default function MyReceipts() {
           const m = new Map<string, string>();
           profilesData.forEach((p) => m.set(p.user_id, p.full_name));
           setUserNameMap(m);
-        } else {
-          setUserNameMap(new Map());
-        }
-      } else {
-        setUserNameMap(new Map());
-      }
+        } else setUserNameMap(new Map());
+      } else setUserNameMap(new Map());
     } catch (e: any) {
       toast({
         title: 'Error',
@@ -444,24 +438,16 @@ export default function MyReceipts() {
       });
       setRows([]);
       setUserNameMap(new Map());
-      setBranchNameMap(new Map());
     } finally {
       setLoading(false);
     }
   };
-
-  // load company whenever profile changes
-  useEffect(() => {
-    fetchCompany().catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [(profile as any)?.company_id]);
 
   useEffect(() => {
     fetchMine();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  // realtime refresh
   useEffect(() => {
     const ch1 = supabase
       .channel('warehouse-my-receipts-realtime')
@@ -501,12 +487,9 @@ export default function MyReceipts() {
         .join(' ')
         .toLowerCase();
 
-      const branchText = getBranchLabel(r.branch_id).toLowerCase();
-
-      return car.includes(s) || notes.includes(s) || itemsText.includes(s) || branchText.includes(s);
+      return car.includes(s) || notes.includes(s) || itemsText.includes(s);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, search, branchNameMap]);
+  }, [rows, search]);
 
   const statusBadge = (s: ReceiptStatus) => {
     if (s === 'pending') return <Badge className="bg-yellow-500">Pending</Badge>;
@@ -514,24 +497,13 @@ export default function MyReceipts() {
     return <Badge className="bg-red-500">Rejected</Badge>;
   };
 
-  // ✅ Direct-download PDF + Waybill image embedding + Company + Branch + Short User ID
   const exportReceiptPdf = async (r: ReceiptRow) => {
     if (!user) return;
 
     setExporting(r.id, true);
 
     try {
-      const companyName = company?.name || 'Philuz Appz';
-      const companyAddress = company?.address || '';
-      const companyPhone = company?.phone || '';
-      const companyEmail = company?.email || '';
-      const companyTaxId = company?.tax_id || '';
-      const footerText = company?.receipt_footer || `${companyName}`;
-
       const staffName = profile?.full_name || 'Unknown';
-      const shortUserId = (user.id || '').replace(/-/g, '').slice(0, 8).toUpperCase();
-      const branchText = getBranchLabel(r.branch_id);
-
       const adminName =
         r.status === 'approved'
           ? userNameMap.get(String(r.approved_by || '')) || 'Admin'
@@ -548,56 +520,41 @@ export default function MyReceipts() {
 
       const doc = new jsPDF({ unit: 'pt', format: 'a4' });
 
-      // Header
-      doc.setFontSize(14);
-      doc.text(`${companyName} — Stock Receipt`, 40, 40);
+      const watermark = r.status === 'pending' ? 'DRAFT' : 'STAFF COPY';
+      drawWatermark(doc, watermark);
 
-      doc.setFontSize(9);
-      doc.setTextColor(71, 85, 105);
+      const receiptNo = receiptNumber('SR', r.created_at, r.id);
 
-      const line1 = [companyAddress].filter(Boolean).join(' • ');
-      const line2 = [companyPhone, companyEmail].filter(Boolean).join(' • ');
-      const line3 = companyTaxId ? `Tax ID: ${companyTaxId}` : '';
+      // header
+      drawCompanyHeader(doc, company, 'Stock Receipt');
 
-      let headerY = 54;
-      if (line1) {
-        doc.text(line1, 40, headerY, { maxWidth: 520 });
-        headerY += 12;
-      }
-      if (line2) {
-        doc.text(line2, 40, headerY, { maxWidth: 520 });
-        headerY += 12;
-      }
-      if (line3) {
-        doc.text(line3, 40, headerY, { maxWidth: 520 });
-        headerY += 12;
-      }
-
-      // Status pill-like
+      // status pill
       const [cr, cg, cb] = statusColor(r.status);
       doc.setFillColor(cr, cg, cb);
-      doc.roundedRect(420, 26, 130, 22, 10, 10, 'F');
+      doc.roundedRect(420, 82, 130, 22, 10, 10, 'F');
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(10);
-      doc.text(statusLabel(r.status), 485, 41, { align: 'center' });
+      doc.text(statusLabel(r.status), 485, 97, { align: 'center' });
+
+      doc.setTextColor(71, 85, 105);
+      doc.setFontSize(9);
+      doc.text(`Receipt No: ${receiptNo}`, 40, 92);
+      doc.text(`Generated: ${new Date().toLocaleString()}`, 320, 92);
 
       doc.setTextColor(15, 23, 42);
       doc.setFontSize(10);
+      doc.text(`Car Number: ${r.car_number}`, 40, 120);
+      doc.text(`Captured At: ${formatDate(r.created_at)}`, 40, 136);
+      doc.text(`Received By: ${staffName}`, 40, 152);
+      doc.text(`Admin: ${adminName}`, 40, 168);
+      doc.text(`Decision Date: ${decisionDate}`, 40, 184);
 
-      const metaStartY = Math.max(70, headerY + 8);
-      doc.text(`Branch: ${branchText}`, 40, metaStartY);
-      doc.text(`Car Number: ${r.car_number}`, 40, metaStartY + 16);
-      doc.text(`Captured At: ${formatDate(r.created_at)}`, 40, metaStartY + 32);
-      doc.text(`Received By: ${staffName} (${shortUserId})`, 40, metaStartY + 48);
-      doc.text(`Admin: ${adminName}`, 40, metaStartY + 64);
-      doc.text(`Decision Date: ${decisionDate}`, 40, metaStartY + 80);
-
-      // Notes
       const notesText = r.notes?.trim() ? r.notes.trim() : '—';
-      doc.text(`Notes: ${notesText}`, 40, metaStartY + 100, { maxWidth: 520 });
+      doc.setTextColor(71, 85, 105);
+      doc.text(`Notes: ${notesText}`, 40, 205, { maxWidth: 520 });
+      doc.setTextColor(15, 23, 42);
 
-      // Rejection reason (if any)
-      let startY = metaStartY + 125;
+      let startY = 230;
       if (r.status === 'rejected') {
         doc.setTextColor(185, 28, 28);
         doc.text(`Rejection Reason: ${r.rejection_reason || '—'}`, 40, startY, { maxWidth: 520 });
@@ -605,7 +562,6 @@ export default function MyReceipts() {
         startY += 18;
       }
 
-      // Items table
       const items = r.items || [];
       const body = items.map((it, idx) => [
         String(idx + 1),
@@ -618,7 +574,7 @@ export default function MyReceipts() {
       const totalQty = items.reduce((sum, it) => sum + Number(it.quantity || 0), 0);
 
       autoTable(doc, {
-        startY: Math.max(startY + 15, 200),
+        startY: Math.max(250, startY + 10),
         head: [['#', 'Product', 'SKU', 'Unit', 'Qty']],
         body: body.length ? body : [['—', 'No items found', '—', '—', '—']],
         styles: { fontSize: 9 },
@@ -630,14 +586,13 @@ export default function MyReceipts() {
         margin: { left: 40, right: 40 },
       });
 
-      let y = (doc as any).lastAutoTable?.finalY || 260;
+      let y = (doc as any).lastAutoTable?.finalY || 320;
 
-      // Totals
       doc.setFontSize(10);
+      doc.setTextColor(15, 23, 42);
       doc.text(`Lines: ${items.length}   •   Total Qty: ${Number(totalQty).toLocaleString()}`, 40, y + 20);
       y += 35;
 
-      // ✅ Waybill embedding (best-effort)
       const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
       if (rawWaybills.length > 0) {
         const signed = await getSignedWaybillUrls(r, 3600);
@@ -649,6 +604,7 @@ export default function MyReceipts() {
         if (toEmbed.length > 0) {
           if (y > 720) {
             doc.addPage();
+            drawWatermark(doc, watermark);
             y = 60;
           }
 
@@ -673,6 +629,7 @@ export default function MyReceipts() {
 
             if (y + drawH + 30 > 820) {
               doc.addPage();
+              drawWatermark(doc, watermark);
               y = 60;
             }
 
@@ -684,9 +641,7 @@ export default function MyReceipts() {
             try {
               doc.addImage(img.dataUrl, img.format, 40, y + 16, drawW, drawH, undefined, 'FAST');
               y = y + 16 + drawH + 18;
-            } catch {
-              // ignore embed failure
-            }
+            } catch {}
           }
 
           doc.setFontSize(8);
@@ -702,10 +657,11 @@ export default function MyReceipts() {
         }
       }
 
-      // Footer
+      const footer = company?.receipt_footer?.trim() || '';
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
-      doc.text(`${footerText} • Generated: ${new Date().toLocaleString()}`, 40, 820);
+      doc.text(footer ? footer : '—', 40, 808, { maxWidth: 380 });
+      doc.text(`Powered by Philuz Appz`, 555, 820, { align: 'right' });
 
       const filename = `MyStockReceipt-${r.car_number}-${r.status}-${new Date().toISOString().slice(0, 10)}.pdf`;
       forceDownloadPdf(doc, filename);
@@ -726,7 +682,7 @@ export default function MyReceipts() {
         <div>
           <h1 className="text-2xl font-bold text-white">My Stock Receipts</h1>
           <p className="text-slate-400">
-            Company: <b>{company?.name || 'Philuz Appz'}</b> • Receipts you captured (pending / approved / rejected)
+            Company: <b>{company?.name || '—'}</b> • Receipts you captured (pending / approved / rejected)
           </p>
         </div>
 
@@ -736,7 +692,6 @@ export default function MyReceipts() {
         </Button>
       </div>
 
-      {/* Tabs */}
       <div className="flex flex-wrap gap-2">
         <Button variant={tab === 'pending' ? 'default' : 'outline'} onClick={() => setTab('pending')}>
           Pending
@@ -749,7 +704,6 @@ export default function MyReceipts() {
         </Button>
       </div>
 
-      {/* Search */}
       <Card className="bg-slate-800/50 border-slate-700">
         <CardHeader>
           <CardTitle className="text-white text-base">Search</CardTitle>
@@ -760,14 +714,13 @@ export default function MyReceipts() {
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Car number, notes, product, branch..."
+              placeholder="Car number, notes, product..."
               className="pl-10 bg-slate-800 border-slate-700 text-white"
             />
           </div>
         </CardContent>
       </Card>
 
-      {/* Results */}
       <Card className="bg-slate-800/50 border-slate-700">
         <CardHeader>
           <CardTitle className="text-white flex items-center gap-2">
@@ -781,7 +734,6 @@ export default function MyReceipts() {
             <TableHeader>
               <TableRow className="border-slate-700">
                 <TableHead className="text-slate-400">Car #</TableHead>
-                <TableHead className="text-slate-400">Branch</TableHead>
                 <TableHead className="text-slate-400">Captured At</TableHead>
                 <TableHead className="text-slate-400">Items</TableHead>
                 <TableHead className="text-slate-400">Total Qty</TableHead>
@@ -794,13 +746,13 @@ export default function MyReceipts() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-slate-400 py-10">
+                  <TableCell colSpan={7} className="text-center text-slate-400 py-10">
                     Loading...
                   </TableCell>
                 </TableRow>
               ) : filtered.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-slate-400 py-10">
+                  <TableCell colSpan={7} className="text-center text-slate-400 py-10">
                     No receipts found.
                   </TableCell>
                 </TableRow>
@@ -815,7 +767,6 @@ export default function MyReceipts() {
                     <Fragment key={r.id}>
                       <TableRow className="border-slate-700">
                         <TableCell className="text-white font-medium">{r.car_number}</TableCell>
-                        <TableCell className="text-slate-300">{getBranchLabel(r.branch_id)}</TableCell>
                         <TableCell className="text-slate-300">{formatDate(r.created_at)}</TableCell>
                         <TableCell className="text-slate-300">{r.items?.length || 0}</TableCell>
                         <TableCell className="text-slate-300">{Number(totalQty).toLocaleString()}</TableCell>
@@ -844,12 +795,7 @@ export default function MyReceipts() {
                               {isOpen ? 'Hide' : 'View'}
                             </Button>
 
-                            <Button
-                              size="sm"
-                              onClick={() => exportReceiptPdf(r)}
-                              title="Download PDF"
-                              disabled={exporting}
-                            >
+                            <Button size="sm" onClick={() => exportReceiptPdf(r)} title="Download PDF" disabled={exporting}>
                               <Download className="h-4 w-4 mr-2" />
                               {exporting ? 'Exporting...' : 'Export'}
                             </Button>
@@ -859,17 +805,12 @@ export default function MyReceipts() {
 
                       {isOpen && (
                         <TableRow className="border-slate-700">
-                          <TableCell colSpan={8} className="p-0">
+                          <TableCell colSpan={7} className="p-0">
                             <div className="bg-slate-900/40 border-t border-slate-700 p-4 space-y-3">
-                              <div className="text-sm text-slate-300">
-                                <span className="text-slate-400">Branch:</span> {getBranchLabel(r.branch_id)}
-                              </div>
-
                               <div className="text-sm text-slate-300">
                                 <span className="text-slate-400">Notes:</span> {r.notes || '—'}
                               </div>
 
-                              {/* Waybill block */}
                               <div className="rounded-md border border-slate-700 bg-slate-950/30 p-3">
                                 <div className="text-sm text-white font-semibold mb-2">Waybill</div>
                                 {waybillCount > 0 ? (
@@ -944,7 +885,6 @@ export default function MyReceipts() {
         </CardContent>
       </Card>
 
-      {/* Waybill Viewer Dialog */}
       <Dialog open={waybillOpen} onOpenChange={(o) => (o ? setWaybillOpen(true) : closeWaybill())}>
         <DialogContent className="bg-slate-900 border-slate-700 max-w-3xl">
           <DialogHeader>
@@ -988,7 +928,6 @@ export default function MyReceipts() {
               </div>
 
               <div className="rounded-md border border-slate-700 bg-black/20 p-2">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={waybillActiveUrls[waybillActiveIndex]}
                   alt="Waybill"
