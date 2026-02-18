@@ -97,9 +97,9 @@ type CompanyMini = {
   address: string | null;
   phone: string | null;
   email: string | null;
+  logo_url: string | null; // not used for now (we use initials)
   tax_id: string | null;
   receipt_footer: string | null;
-  logo_url: string | null; // not used now (initials logo)
 };
 
 function fmtDate(d?: string | null) {
@@ -111,6 +111,18 @@ function fmtDate(d?: string | null) {
 
 function safeUpper(v?: string | null) {
   return (v || "").toString().toUpperCase();
+}
+
+// ✅ short user id for receipts/audit (stable + small)
+function shortUserId(userId?: string | null) {
+  const s = (userId || "").replace(/-/g, "");
+  if (!s) return "USR-—";
+  return `USR-${s.slice(0, 6).toUpperCase()}`;
+}
+
+function formatUserLabel(name: string | null | undefined, userId?: string | null) {
+  const n = (name || "Unknown").trim() || "Unknown";
+  return `${n} (${shortUserId(userId)})`;
 }
 
 function forceDownloadPdf(doc: jsPDF, filename: string) {
@@ -127,7 +139,7 @@ function forceDownloadPdf(doc: jsPDF, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// normalize jsonb -> string[]
+// ✅ normalize jsonb -> string[]
 function normalizeWaybillUrls(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
@@ -142,7 +154,7 @@ function normalizeWaybillUrls(v: any): string[] {
 }
 
 /**
- * createSignedUrl expects bucket-relative PATH (not full URL)
+ * ✅ createSignedUrl expects bucket-relative PATH (not full URL)
  */
 function extractWaybillPath(urlOrPath: string): string {
   const s = (urlOrPath || "").trim();
@@ -162,18 +174,6 @@ function extractWaybillPath(urlOrPath: string): string {
   }
 
   return s;
-}
-
-function isLikelyImageUrl(url?: string | null) {
-  if (!url) return false;
-  const u = url.toLowerCase();
-  return (
-    u.includes(".png") ||
-    u.includes(".jpg") ||
-    u.includes(".jpeg") ||
-    u.includes(".webp") ||
-    u.includes("image")
-  );
 }
 
 async function imageUrlToDataUrl(
@@ -231,6 +231,9 @@ function fitIntoBox(
   return { w: Math.max(1, imgW * scale), h: Math.max(1, imgH * scale) };
 }
 
+// -----------------------------
+// ✅ A–E PDF helpers
+// -----------------------------
 function getInitials(name: string) {
   const parts = (name || "")
     .trim()
@@ -255,8 +258,6 @@ function drawWatermark(doc: jsPDF, text: string) {
   const w = doc.internal.pageSize.getWidth();
   const h = doc.internal.pageSize.getHeight();
 
-  doc.saveGraphicsState?.();
-  // fallback if saveGraphicsState isn't available
   try {
     (doc as any).setGState?.(new (doc as any).GState({ opacity: 0.08 }));
   } catch {}
@@ -268,7 +269,6 @@ function drawWatermark(doc: jsPDF, text: string) {
   try {
     (doc as any).setGState?.(new (doc as any).GState({ opacity: 1 }));
   } catch {}
-  doc.restoreGraphicsState?.();
 }
 
 function drawCompanyHeader(
@@ -280,7 +280,7 @@ function drawCompanyHeader(
   const companyName = company?.name || "Company";
   const initials = getInitials(companyName);
 
-  // Initials badge
+  // Initials badge (A)
   doc.setFillColor(30, 41, 59);
   doc.circle(54, 44, 16, "F");
   doc.setTextColor(255, 255, 255);
@@ -292,7 +292,7 @@ function drawCompanyHeader(
   doc.setFontSize(15);
   doc.text(`${companyName} — ${titleRight}`, 80, 44);
 
-  // company contacts line
+  // contacts
   const contactParts = [
     company?.address?.trim() ? company.address.trim() : null,
     company?.phone?.trim() ? `Tel: ${company.phone.trim()}` : null,
@@ -302,13 +302,11 @@ function drawCompanyHeader(
 
   doc.setFontSize(9.5);
   doc.setTextColor(71, 85, 105);
-  if (contactParts.length > 0) {
-    doc.text(contactParts.join(" • "), 80, 60, { maxWidth: 380 });
-  } else {
-    doc.text("—", 80, 60);
-  }
+  doc.text(contactParts.length ? contactParts.join(" • ") : "—", 80, 60, {
+    maxWidth: 380,
+  });
 
-  // Status chip
+  // status chip
   const statusText = safeUpper(status);
   let chipColor: [number, number, number] = [245, 158, 11];
   if (status === "approved") chipColor = [34, 197, 94];
@@ -327,8 +325,8 @@ function drawCompanyHeader(
 
 export default function StockApprovals() {
   const { toast } = useToast();
-
   const { user, isAdmin, activeBranchId, profile } = useAuth();
+
   const sb = supabase as any;
 
   const [loading, setLoading] = useState(true);
@@ -339,19 +337,15 @@ export default function StockApprovals() {
 
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
   const [branchNameMap, setBranchNameMap] = useState<Map<string, string>>(new Map());
+  const [company, setCompany] = useState<CompanyMini | null>(null);
   const [auditMap, setAuditMap] = useState<Map<string, AuditRow[]>>(new Map());
 
-  // ✅ company details for PDF header/footer
-  const [company, setCompany] = useState<CompanyMini | null>(null);
-
-  // reject dialog
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
 
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
 
-  // Waybill viewer dialog
   const [waybillOpen, setWaybillOpen] = useState(false);
   const [waybillActiveReceiptId, setWaybillActiveReceiptId] = useState<string | null>(null);
   const [waybillActiveUrls, setWaybillActiveUrls] = useState<string[]>([]);
@@ -365,31 +359,6 @@ export default function StockApprovals() {
     setWaybillActiveIndex(0);
     setWaybillSigning(false);
   };
-
-  // ✅ load company details for PDF headers
-  useEffect(() => {
-    const companyId = (profile as any)?.company_id ?? null;
-    if (!companyId) {
-      setCompany(null);
-      return;
-    }
-
-    (async () => {
-      try {
-        const { data, error } = await sb
-          .from("companies")
-          .select("id,name,address,phone,email,tax_id,receipt_footer,logo_url")
-          .eq("id", companyId)
-          .maybeSingle();
-
-        if (error) throw error;
-        setCompany((data as CompanyMini) || null);
-      } catch {
-        setCompany(null);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [(profile as any)?.company_id]);
 
   const openWaybillsForReceipt = async (r: ReceiptRow, startIndex = 0) => {
     const raw = normalizeWaybillUrls(r.waybill_urls);
@@ -444,6 +413,32 @@ export default function StockApprovals() {
     if (!branchId) return "—";
     return branchNameMap.get(branchId) || branchId;
   };
+
+  const fetchCompany = async () => {
+    try {
+      const companyId = (profile as any)?.company_id ?? null;
+      if (!companyId) {
+        setCompany(null);
+        return;
+      }
+
+      const { data, error } = await sb
+        .from("companies")
+        .select("id,name,address,phone,email,logo_url,tax_id,receipt_footer")
+        .eq("id", companyId)
+        .maybeSingle();
+
+      if (error) throw error;
+      setCompany((data as CompanyMini) ?? null);
+    } catch {
+      setCompany(null);
+    }
+  };
+
+  useEffect(() => {
+    fetchCompany();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(profile as any)?.company_id]);
 
   const fetchBranchNamesForReceipts = async (rows: ReceiptRow[]) => {
     try {
@@ -517,13 +512,9 @@ export default function StockApprovals() {
       const rows = (data ?? []) as ReceiptRow[];
       setReceipts(rows);
 
-      if (isAdmin && !activeBranchId) {
-        fetchBranchNamesForReceipts(rows).catch(() => {});
-      } else {
-        setBranchNameMap(new Map());
-      }
+      if (isAdmin) fetchBranchNamesForReceipts(rows).catch(() => {});
+      else setBranchNameMap(new Map());
 
-      // user name mapping
       const ids = new Set<string>();
       rows.forEach((r) => {
         if (r.created_by) ids.add(r.created_by);
@@ -532,14 +523,14 @@ export default function StockApprovals() {
       });
 
       if (ids.size > 0) {
-        const { data: profilesData, error: pErr } = await sb
+        const { data: profiles, error: pErr } = await sb
           .from("profiles")
           .select("user_id, full_name")
           .in("user_id", Array.from(ids));
 
-        if (!pErr && profilesData) {
+        if (!pErr && profiles) {
           const m = new Map<string, string>();
-          (profilesData as any[]).forEach((p) => m.set(p.user_id, p.full_name));
+          (profiles as any[]).forEach((p) => m.set(p.user_id, p.full_name));
           setUserNameMap(m);
         } else setUserNameMap(new Map());
       } else setUserNameMap(new Map());
@@ -579,15 +570,15 @@ export default function StockApprovals() {
 
       const missing = Array.from(actorIds).filter((id) => !userNameMap.has(id));
       if (missing.length > 0) {
-        const { data: profilesData } = await sb
+        const { data: profiles } = await sb
           .from("profiles")
           .select("user_id, full_name")
           .in("user_id", missing);
 
-        if (profilesData && profilesData.length > 0) {
+        if (profiles && profiles.length > 0) {
           setUserNameMap((prev) => {
             const next = new Map(prev);
-            (profilesData as any[]).forEach((p) => next.set(p.user_id, p.full_name));
+            (profiles as any[]).forEach((p) => next.set(p.user_id, p.full_name));
             return next;
           });
         }
@@ -779,7 +770,7 @@ export default function StockApprovals() {
   };
 
   // -----------------------------
-  // PDF EXPORT (Admin) — Company + Branch + ReceiptNo + Watermark + Footer
+  // ✅ PDF EXPORTS (A–E applied)
   // -----------------------------
   const exportReceiptPdf = async (r: ReceiptRow, includeAudit: boolean) => {
     let audit = auditMap.get(r.id) || [];
@@ -803,28 +794,33 @@ export default function StockApprovals() {
 
     const doc = new jsPDF({ unit: "pt", format: "a4" });
 
-    // Watermark rules:
-    // - pending => DRAFT
-    // - approved/rejected => ADMIN COPY (admin area)
+    // (E) watermark
     const wm = r.status === "pending" ? "DRAFT" : "ADMIN COPY";
     drawWatermark(doc, wm);
 
-    const createdBy = userNameMap.get(r.created_by) || "Unknown";
-    const approvedBy = r.approved_by ? userNameMap.get(String(r.approved_by)) || "Unknown" : "";
-    const rejectedBy = r.rejected_by ? userNameMap.get(String(r.rejected_by)) || "Unknown" : "";
-
-    const branchText = getBranchLabel(r.branch_id);
-    const receiptNo = receiptNumber("SR", r.created_at, r.id);
-
-    // Header (company + contacts + status)
+    // (A) header
     drawCompanyHeader(doc, company, "Stock Receipt", r.status);
 
+    // (D) receipt no + generated
+    const receiptNo = receiptNumber("SR", r.created_at, r.id);
     doc.setFontSize(9);
     doc.setTextColor(71, 85, 105);
     doc.text(`Receipt No: ${receiptNo}`, 40, 92);
     doc.text(`Generated: ${new Date().toLocaleString()}`, 320, 92);
 
-    // Meta block
+    const createdByName = userNameMap.get(r.created_by) || "Unknown";
+    const createdByLabel = formatUserLabel(createdByName, r.created_by);
+
+    const approvedByLabel = r.approved_by
+      ? formatUserLabel(userNameMap.get(String(r.approved_by)) || "Unknown", String(r.approved_by))
+      : "";
+
+    const rejectedByLabel = r.rejected_by
+      ? formatUserLabel(userNameMap.get(String(r.rejected_by)) || "Unknown", String(r.rejected_by))
+      : "";
+
+    const branchText = getBranchLabel(r.branch_id);
+
     doc.setTextColor(15, 23, 42);
     doc.setFontSize(10);
 
@@ -835,7 +831,7 @@ export default function StockApprovals() {
     doc.text(`Branch: ${branchText}`, leftX, y);
     doc.text(`Car Number: ${r.car_number}`, leftX, y + 16);
     doc.text(`Captured At: ${fmtDate(r.created_at)}`, leftX, y + 32);
-    doc.text(`Captured By: ${createdBy}`, leftX, y + 48);
+    doc.text(`Captured By: ${createdByLabel}`, leftX, y + 48);
 
     if (r.notes) {
       doc.setTextColor(71, 85, 105);
@@ -844,12 +840,11 @@ export default function StockApprovals() {
       y += 18;
     }
 
-    // Decision info (right column)
     if (r.status === "approved") {
-      doc.text(`Approved By: ${approvedBy}`, rightX, 118);
+      doc.text(`Approved By: ${approvedByLabel}`, rightX, 118);
       doc.text(`Approved At: ${fmtDate(r.approved_at)}`, rightX, 134);
     } else if (r.status === "rejected") {
-      doc.text(`Rejected By: ${rejectedBy}`, rightX, 118);
+      doc.text(`Rejected By: ${rejectedByLabel}`, rightX, 118);
       doc.text(`Rejected At: ${fmtDate(r.rejected_at)}`, rightX, 134);
       doc.setTextColor(185, 28, 28);
       doc.text(`Reason: ${r.rejection_reason || "—"}`, rightX, 150, { maxWidth: 240 });
@@ -860,7 +855,6 @@ export default function StockApprovals() {
       doc.setTextColor(15, 23, 42);
     }
 
-    // Items table
     const items = r.items || [];
     const body = items.map((it) => {
       const p = it.product;
@@ -896,7 +890,6 @@ export default function StockApprovals() {
 
     // Waybill embed preview (up to 2)
     const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
-
     if (rawWaybills.length > 0) {
       const signed: string[] = [];
       for (const u of rawWaybills.slice(0, 2)) {
@@ -921,11 +914,7 @@ export default function StockApprovals() {
 
         doc.setFontSize(9);
         doc.setTextColor(71, 85, 105);
-        doc.text(
-          `Showing ${signed.length} of ${rawWaybills.length} (signed links expire ~1 hour)`,
-          40,
-          y + 14
-        );
+        doc.text(`Showing ${signed.length} of ${rawWaybills.length} (signed links expire ~1 hour)`, 40, y + 14);
 
         y += 26;
 
@@ -976,17 +965,6 @@ export default function StockApprovals() {
 
         const rowsUsed = Math.ceil(signed.length / 2);
         y = y + rowsUsed * (boxH + 26) + 8;
-      } else {
-        y += 26;
-        if (y > 760) {
-          doc.addPage();
-          drawWatermark(doc, wm);
-          y = 60;
-        }
-        doc.setFontSize(10);
-        doc.setTextColor(71, 85, 105);
-        doc.text(`Waybill: ${rawWaybills.length} file(s) attached (signing failed for embed)`, 40, y);
-        y += 10;
       }
     }
 
@@ -997,7 +975,7 @@ export default function StockApprovals() {
         a.action,
         a.from_status || "—",
         a.to_status || "—",
-        a.actor_id ? userNameMap.get(a.actor_id) || "Unknown" : "—",
+        a.actor_id ? formatUserLabel(userNameMap.get(a.actor_id) || "Unknown", a.actor_id) : "—",
         a.note || "",
       ]);
 
@@ -1019,26 +997,16 @@ export default function StockApprovals() {
         styles: { fontSize: 8, cellPadding: 3 },
         margin: { left: 40, right: 40 },
         headStyles: { fillColor: [15, 23, 42] as any },
-        columnStyles: {
-          0: { cellWidth: 95 },
-          1: { cellWidth: 85 },
-          2: { cellWidth: 55 },
-          3: { cellWidth: 55 },
-          4: { cellWidth: 75 },
-          5: { cellWidth: "auto" },
-        },
       });
 
       y = (doc as any).lastAutoTable?.finalY || y + 70;
     }
 
-    // Footer
-    const footer = company?.receipt_footer?.trim() || "";
+    // (B) footer
+    const footer = company?.receipt_footer?.trim() || "—";
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-
-    const footerLeft = footer ? footer : "—";
-    doc.text(footerLeft, 40, 808, { maxWidth: 380 });
+    doc.text(footer, 40, 808, { maxWidth: 380 });
     doc.text(`Powered by Philuz Appz`, 555, 820, { align: "right" });
 
     const filename = `StockReceipt-${r.car_number}-${r.status}${includeAudit ? "-audit" : ""}.pdf`;
@@ -1053,10 +1021,10 @@ export default function StockApprovals() {
 
     const doc = new jsPDF({ unit: "pt", format: "a4" });
 
-    // watermark for exports
+    // (E) watermark for exports
     drawWatermark(doc, "ADMIN COPY");
 
-    // header
+    // (A) header
     drawCompanyHeader(doc, company, "Stock Receipts Export", tab);
 
     doc.setFontSize(10);
@@ -1069,14 +1037,14 @@ export default function StockApprovals() {
       98
     );
 
+    const includeBranchCol = isAdmin && !activeBranchId;
+
     const body = filtered.map((r) => {
-      const createdBy = userNameMap.get(r.created_by) || "Unknown";
+      const createdBy = formatUserLabel(userNameMap.get(r.created_by) || "Unknown", r.created_by);
       const qtyTotal = (r.items || []).reduce((sum, it) => sum + Number(it.quantity || 0), 0);
       const wb = normalizeWaybillUrls(r.waybill_urls).length;
 
-      return [
-        !activeBranchId ? getBranchLabel(r.branch_id) : "",
-        receiptNumber("SR", r.created_at, r.id),
+      const row = [
         r.car_number,
         createdBy,
         fmtDate(r.created_at),
@@ -1085,29 +1053,29 @@ export default function StockApprovals() {
         r.status.toUpperCase(),
         wb > 0 ? `YES (${wb})` : "NO",
       ];
+
+      // (C) add branch name only when "All branches" mode
+      return includeBranchCol ? [getBranchLabel(r.branch_id), ...row] : row;
     });
 
-    const head = !activeBranchId
-      ? [["Branch", "Receipt #", "Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]]
-      : [["Receipt #", "Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]];
-
-    const body2 = !activeBranchId
-      ? body
-      : body.map((row) => row.slice(1)); // remove Branch col if branch fixed
+    const head = includeBranchCol
+      ? [["Branch", "Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]]
+      : [["Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]];
 
     autoTable(doc, {
       startY: 120,
       head,
-      body: body2,
+      body,
       styles: { fontSize: 9 },
       margin: { left: 40, right: 40 },
       headStyles: { fillColor: [30, 41, 59] as any },
     });
 
-    const footer = company?.receipt_footer?.trim() || "";
+    // (B) footer
+    const footer = company?.receipt_footer?.trim() || "—";
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(footer ? footer : "—", 40, 808, { maxWidth: 380 });
+    doc.text(footer, 40, 808, { maxWidth: 380 });
     doc.text(`Powered by Philuz Appz`, 555, 820, { align: "right" });
 
     const filename = `StockReceipts-${tab}-${new Date().toISOString().slice(0, 10)}.pdf`;
@@ -1120,7 +1088,7 @@ export default function StockApprovals() {
         <div>
           <h1 className="text-2xl font-bold text-white">Stock Approvals</h1>
           <p className="text-slate-400">
-            Company: <b>{company?.name || "—"}</b> •{" "}
+            Company: <b className="text-white">{company?.name || "—"}</b> •{" "}
             {isAdmin ? (
               <>
                 Viewing:{" "}
@@ -1197,7 +1165,6 @@ export default function StockApprovals() {
             <TableHeader>
               <TableRow className="border-slate-700">
                 {isAdmin && !activeBranchId && <TableHead className="text-slate-400">Branch</TableHead>}
-
                 <TableHead className="text-slate-400">Car #</TableHead>
                 <TableHead className="text-slate-400">Captured By</TableHead>
                 <TableHead className="text-slate-400">Captured At</TableHead>
@@ -1227,6 +1194,7 @@ export default function StockApprovals() {
                   const isOpen = expanded.has(r.id);
                   const totalQty = (r.items || []).reduce((sum, it) => sum + Number(it.quantity || 0), 0);
                   const creatorName = userNameMap.get(r.created_by) || "Unknown";
+                  const creatorLabel = formatUserLabel(creatorName, r.created_by);
                   const busy = processingIds.has(r.id);
                   const audit = auditMap.get(r.id) || [];
                   const waybillCount = normalizeWaybillUrls(r.waybill_urls).length;
@@ -1254,7 +1222,7 @@ export default function StockApprovals() {
                           </button>
                         </TableCell>
 
-                        <TableCell className="text-slate-300">{creatorName}</TableCell>
+                        <TableCell className="text-slate-300">{creatorLabel}</TableCell>
                         <TableCell className="text-slate-300">{fmtDate(r.created_at)}</TableCell>
                         <TableCell className="text-slate-300">{r.items?.length || 0}</TableCell>
                         <TableCell className="text-slate-300">{Number(totalQty).toLocaleString()}</TableCell>
@@ -1280,16 +1248,9 @@ export default function StockApprovals() {
                               PDF
                             </Button>
 
-                            {isAdmin && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => exportReceiptPdf(r, true)}
-                                title="Export to PDF with Audit Log"
-                              >
-                                PDF + Audit
-                              </Button>
-                            )}
+                            <Button size="sm" variant="outline" onClick={() => exportReceiptPdf(r, true)} title="Export to PDF with Audit Log">
+                              PDF + Audit
+                            </Button>
 
                             {r.status === "pending" ? (
                               <>
@@ -1328,7 +1289,7 @@ export default function StockApprovals() {
                                   {r.status === "approved" && (
                                     <>
                                       <span className="text-slate-400">Approved By:</span>{" "}
-                                      {r.approved_by ? userNameMap.get(String(r.approved_by)) || "Unknown" : "—"}
+                                      {r.approved_by ? formatUserLabel(userNameMap.get(String(r.approved_by)) || "Unknown", String(r.approved_by)) : "—"}
                                       <br />
                                       <span className="text-slate-400">Approved At:</span> {fmtDate(r.approved_at)}
                                     </>
@@ -1337,7 +1298,7 @@ export default function StockApprovals() {
                                   {r.status === "rejected" && (
                                     <>
                                       <span className="text-slate-400">Rejected By:</span>{" "}
-                                      {r.rejected_by ? userNameMap.get(String(r.rejected_by)) || "Unknown" : "—"}
+                                      {r.rejected_by ? formatUserLabel(userNameMap.get(String(r.rejected_by)) || "Unknown", String(r.rejected_by)) : "—"}
                                       <br />
                                       <span className="text-slate-400">Rejected At:</span> {fmtDate(r.rejected_at)}
                                       <br />
@@ -1355,11 +1316,10 @@ export default function StockApprovals() {
 
                               <div className="rounded-md border border-slate-700 bg-slate-950/30 p-3">
                                 <div className="text-sm text-white font-semibold mb-2">Waybill</div>
-                                {normalizeWaybillUrls(r.waybill_urls).length > 0 ? (
+                                {waybillCount > 0 ? (
                                   <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
                                     <div className="text-xs text-slate-300">
-                                      Attached images:{" "}
-                                      <b className="text-white">{normalizeWaybillUrls(r.waybill_urls).length}</b>
+                                      Attached images: <b className="text-white">{waybillCount}</b>
                                     </div>
                                     <div className="flex gap-2">
                                       <Button size="sm" variant="outline" onClick={() => openWaybillsForReceipt(r, 0)}>
@@ -1439,14 +1399,11 @@ export default function StockApprovals() {
                                         </div>
 
                                         <div className="text-slate-400">
-                                          By: {a.actor_id ? userNameMap.get(a.actor_id) || "Unknown" : "—"}
+                                          By:{" "}
+                                          {a.actor_id ? formatUserLabel(userNameMap.get(a.actor_id) || "Unknown", a.actor_id) : "—"}
                                         </div>
                                       </div>
                                     ))}
-
-                                    {audit.length > 8 && (
-                                      <div className="text-[11px] text-slate-500">Showing latest 8 entries.</div>
-                                    )}
                                   </div>
                                 )}
                               </div>
