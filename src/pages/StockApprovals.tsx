@@ -309,7 +309,7 @@ function getHeaderContactParts(
   return parts;
 }
 
-// ✅ header: accepts contactParts and wraps lines to avoid overlap
+// ✅ accepts contactParts and wraps lines to avoid overlap
 function drawCompanyHeader(
   doc: jsPDF,
   company: CompanyMini | null,
@@ -370,11 +370,8 @@ export default function StockApprovals() {
 
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
 
-  // ✅ branch map (name + address + phone + email)
+  // ✅ branch map (name + address + phone + email) — MUST exist for STAFF too
   const [branchMap, setBranchMap] = useState<Map<string, BranchMini>>(new Map());
-
-  // ✅ keep staff/admin “context branch” loaded here (so header always has branch contacts)
-  const [contextBranch, setContextBranch] = useState<BranchMini | null>(null);
 
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [auditMap, setAuditMap] = useState<Map<string, AuditRow[]>>(new Map());
@@ -474,56 +471,20 @@ export default function StockApprovals() {
     }
   };
 
-  // ✅ Fetch “context branch” (staff always has one; admin only when selecting a branch)
-  const fetchBranchDetailsForContext = async () => {
-    try {
-      const companyId = (profile as any)?.company_id ?? null;
-      const branchId = activeBranchId ?? null;
-
-      if (!branchId) {
-        setContextBranch(null);
-        return;
-      }
-
-      let q = sb.from("branches").select("id,name,address,phone,email").eq("id", branchId).maybeSingle();
-      if (companyId) q = q.eq("company_id", companyId);
-
-      const { data, error } = await q;
-      if (error) throw error;
-
-      setContextBranch((data as BranchMini) ?? null);
-
-      // also ensure it's inside branchMap so label lookups work for staff too
-      if (data?.id) {
-        setBranchMap((prev) => {
-          const next = new Map(prev);
-          next.set(data.id, data as BranchMini);
-          return next;
-        });
-      }
-    } catch {
-      setContextBranch(null);
-    }
-  };
-
   useEffect(() => {
     fetchCompany();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [(profile as any)?.company_id]);
 
-  useEffect(() => {
-    fetchBranchDetailsForContext();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeBranchId, (profile as any)?.company_id]);
-
-  // ✅ For admin "all branches" table: fetch all branches in current results (with contacts too)
-  const fetchBranchesForReceipts = async (rows: ReceiptRow[]) => {
+  // ✅ NEW: fetch branch details for ids (WORKS for admin + staff)
+  const fetchBranchesByIds = async (ids: string[]) => {
     try {
-      const ids = Array.from(new Set(rows.map((r) => r.branch_id).filter(Boolean) as string[]));
-      if (ids.length === 0) return;
+      const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+      if (uniqueIds.length === 0) return;
 
       const companyId = (profile as any)?.company_id ?? null;
-      let q = sb.from("branches").select("id,name,address,phone,email").in("id", ids);
+
+      let q = sb.from("branches").select("id,name,address,phone,email").in("id", uniqueIds);
       if (companyId) q = q.eq("company_id", companyId);
 
       const { data, error } = await q;
@@ -534,8 +495,24 @@ export default function StockApprovals() {
         (data as BranchMini[] | null)?.forEach((b) => next.set(b.id, b));
         return next;
       });
-    } catch {}
+    } catch {
+      // keep whatever we already have
+    }
   };
+
+  // ✅ UPDATED: fetch branches for current receipts (admin + staff)
+  const fetchBranchDetailsForReceipts = async (rows: ReceiptRow[]) => {
+    const ids = Array.from(new Set(rows.map((r) => r.branch_id).filter(Boolean) as string[]));
+    await fetchBranchesByIds(ids);
+  };
+
+  // ✅ ALSO: ensure staff gets their active branch loaded (even if no rows yet)
+  useEffect(() => {
+    if (activeBranchId) {
+      fetchBranchesByIds([activeBranchId]).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBranchId, (profile as any)?.company_id]);
 
   const fetchReceipts = async () => {
     setLoading(true);
@@ -576,11 +553,8 @@ export default function StockApprovals() {
         .eq("status", tab)
         .order("created_at", { ascending: false });
 
-      // Admin can filter by selected branch
+      // admin filtering
       if (isAdmin && activeBranchId) q = q.eq("branch_id", activeBranchId);
-
-      // If staff has activeBranchId, this will already scope by RLS, but filtering is OK too
-      if (!isAdmin && activeBranchId) q = q.eq("branch_id", activeBranchId);
 
       const { data, error } = await q;
       if (error) throw error;
@@ -588,10 +562,8 @@ export default function StockApprovals() {
       const rows = (data ?? []) as ReceiptRow[];
       setReceipts(rows);
 
-      // For admin all-branches view, fetch branch details for rows
-      if (isAdmin && !activeBranchId) {
-        fetchBranchesForReceipts(rows).catch(() => {});
-      }
+      // ✅ IMPORTANT: load branch details for rows for BOTH admin + staff
+      fetchBranchDetailsForReceipts(rows).catch(() => {});
 
       const ids = new Set<string>();
       rows.forEach((r) => {
@@ -620,6 +592,7 @@ export default function StockApprovals() {
       });
       setReceipts([]);
       setUserNameMap(new Map());
+      // keep branchMap as-is (so staff header can still work)
     } finally {
       setLoading(false);
     }
@@ -666,7 +639,7 @@ export default function StockApprovals() {
   useEffect(() => {
     fetchReceipts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, activeBranchId, isAdmin]);
+  }, [tab, activeBranchId]);
 
   useEffect(() => {
     const ch1 = supabase
@@ -693,7 +666,7 @@ export default function StockApprovals() {
       supabase.removeChannel(ch3);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, activeBranchId, isAdmin]);
+  }, [tab, activeBranchId]);
 
   const toggleExpand = (id: string) => {
     const willOpen = !expanded.has(id);
@@ -846,19 +819,8 @@ export default function StockApprovals() {
     );
   };
 
-  // ✅ decide which branch contact to show for a single receipt
-  const getHeaderBranchForReceipt = (r: ReceiptRow): BranchMini | null => {
-    // 1) If user is currently working in a branch (staff/admin selected), prefer that
-    if (contextBranch) return contextBranch;
-
-    // 2) fallback to receipt's branch
-    if (r.branch_id) return branchMap.get(r.branch_id) || null;
-
-    return null;
-  };
-
   // -----------------------------
-  // ✅ PDF EXPORTS
+  // ✅ PDF EXPORTS (Option B + STAFF branch header fix)
   // -----------------------------
   const exportReceiptPdf = async (r: ReceiptRow, includeAudit: boolean) => {
     let audit = auditMap.get(r.id) || [];
@@ -882,11 +844,23 @@ export default function StockApprovals() {
 
     const doc = new jsPDF({ unit: "pt", format: "a4" });
 
-    // ✅ watermark: staff copies should be STAFF COPY, admin is ADMIN COPY
-    const wm = r.status === "pending" ? "DRAFT" : (isAdmin ? "ADMIN COPY" : "STAFF COPY");
+    // ✅ watermark:
+    // - admins: ADMIN COPY
+    // - staff: STAFF COPY
+    const wm =
+      r.status === "pending"
+        ? "DRAFT"
+        : (isAdmin ? "ADMIN COPY" : "STAFF COPY");
+
     drawWatermark(doc, wm);
 
-    const headerBranch = getHeaderBranchForReceipt(r);
+    // ✅ Branch contact for SINGLE receipt:
+    // - staff should use THEIR active branch address (activeBranchId) if available
+    // - else fallback to receipt's branch_id
+    const staffBranch = activeBranchId ? (branchMap.get(activeBranchId) || null) : null;
+    const receiptBranch = r.branch_id ? (branchMap.get(r.branch_id) || null) : null;
+
+    const headerBranch = isAdmin ? receiptBranch : (staffBranch || receiptBranch);
     const contactParts = getHeaderContactParts(company, headerBranch, "branch");
 
     drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
@@ -977,6 +951,7 @@ export default function StockApprovals() {
 
     y = (doc as any).lastAutoTable?.finalY || 270;
 
+    // Waybill embed preview (up to 2)
     const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
     if (rawWaybills.length > 0) {
       const signed: string[] = [];
@@ -1056,6 +1031,7 @@ export default function StockApprovals() {
       }
     }
 
+    // Audit (optional)
     if (includeAudit) {
       const auditRows = (audit || []).slice(0, 12).map((a) => [
         fmtDate(a.created_at),
@@ -1089,6 +1065,7 @@ export default function StockApprovals() {
       y = (doc as any).lastAutoTable?.finalY || y + 70;
     }
 
+    // footer
     const footer = company?.receipt_footer?.trim() || "—";
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
@@ -1107,14 +1084,13 @@ export default function StockApprovals() {
 
     const doc = new jsPDF({ unit: "pt", format: "a4" });
 
-    drawWatermark(doc, isAdmin ? "ADMIN COPY" : "STAFF COPY");
+    drawWatermark(doc, "ADMIN COPY");
 
-    // ✅ Option B logic for exports:
-    // - if branch selected (or staff branch context exists) -> show ONLY that branch
-    // - if all branches (admin only) -> show company full address
-    const mode: "all" | "branch" = (isAdmin && !activeBranchId) ? "all" : "branch";
-    const selectedBranch = mode === "branch" ? (contextBranch || null) : null;
-    const contactParts = getHeaderContactParts(company, selectedBranch, mode);
+    // Option B:
+    // - if branch selected -> show ONLY that branch address/contact (fallback to company)
+    // - if all branches -> show full company address/contact
+    const selectedBranch = activeBranchId ? branchMap.get(activeBranchId) || null : null;
+    const contactParts = getHeaderContactParts(company, selectedBranch, activeBranchId ? "branch" : "all");
 
     drawCompanyHeader(doc, company, "Stock Receipts Export", tab, contactParts);
 
@@ -1122,7 +1098,7 @@ export default function StockApprovals() {
     doc.setTextColor(71, 85, 105);
     doc.text(
       `Tab: ${tab.toUpperCase()} • Branch: ${
-        isAdmin ? (activeBranchId ? getBranchLabel(activeBranchId) : "All branches") : (activeBranchId ? getBranchLabel(activeBranchId) : "—")
+        isAdmin ? (activeBranchId ? getBranchLabel(activeBranchId) : "All branches") : "—"
       } • Exported: ${new Date().toLocaleString()}`,
       40,
       112
@@ -1186,12 +1162,7 @@ export default function StockApprovals() {
                 </b>
               </>
             ) : (
-              <>
-                Branch:{" "}
-                <b className="text-white">
-                  {activeBranchId ? getBranchLabel(activeBranchId) : "—"}
-                </b>
-              </>
+              "Review warehouse receiving before approving stock updates"
             )}
           </p>
         </div>
