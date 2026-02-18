@@ -48,6 +48,9 @@ type ReceiptRow = {
   created_at: string;
   created_by: string;
 
+  // ✅ include branch_id so we can print branch name on PDFs
+  branch_id?: string | null;
+
   approved_at?: string | null;
   approved_by?: string | null;
   rejected_at?: string | null;
@@ -59,6 +62,19 @@ type ReceiptRow = {
 
   items?: ReceiptItem[];
 };
+
+type CompanyMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  logo_url: string | null;
+  tax_id: string | null;
+  receipt_footer: string | null;
+};
+
+type BranchMini = { id: string; name: string };
 
 function formatDate(d?: string | null) {
   if (!d) return '-';
@@ -211,6 +227,12 @@ export default function MyReceipts() {
   // map user_id -> full_name (for admin approver/rejector)
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
 
+  // ✅ company details (for PDFs)
+  const [company, setCompany] = useState<CompanyMini | null>(null);
+
+  // ✅ branch name map (for PDFs)
+  const [branchNameMap, setBranchNameMap] = useState<Map<string, string>>(new Map());
+
   // ✅ per-receipt pdf export state
   const [exportingIds, setExportingIds] = useState<Set<string>>(new Set());
   const setExporting = (id: string, on: boolean) => {
@@ -294,6 +316,60 @@ export default function MyReceipts() {
     }
   };
 
+  // ✅ helper: branch label
+  const getBranchLabel = (branchId?: string | null) => {
+    if (!branchId) return '—';
+    return branchNameMap.get(branchId) || branchId;
+  };
+
+  // ✅ load company details for PDF header
+  const fetchCompany = async () => {
+    const companyId = (profile as any)?.company_id || null;
+    if (!companyId) {
+      setCompany(null);
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('companies')
+        .select('id,name,address,phone,email,logo_url,tax_id,receipt_footer')
+        .eq('id', companyId)
+        .single();
+
+      if (error) throw error;
+      setCompany((data as any) as CompanyMini);
+    } catch {
+      // non-blocking
+      setCompany(null);
+    }
+  };
+
+  // ✅ load branch names for receipts
+  const fetchBranchNamesForRows = async (list: ReceiptRow[]) => {
+    try {
+      const companyId = (profile as any)?.company_id || null;
+
+      const ids = Array.from(new Set(list.map((r) => r.branch_id).filter(Boolean) as string[]));
+      if (ids.length === 0) {
+        setBranchNameMap(new Map());
+        return;
+      }
+
+      let q = supabase.from('branches').select('id,name').in('id', ids);
+      if (companyId) q = q.eq('company_id', companyId);
+
+      const { data, error } = await q;
+      if (error) throw error;
+
+      const m = new Map<string, string>();
+      (data as BranchMini[] | null)?.forEach((b) => m.set(b.id, b.name));
+      setBranchNameMap(m);
+    } catch {
+      setBranchNameMap(new Map());
+    }
+  };
+
   const fetchMine = async () => {
     if (!user) return;
 
@@ -309,6 +385,7 @@ export default function MyReceipts() {
             status,
             created_at,
             created_by,
+            branch_id,
             approved_at,
             approved_by,
             rejected_at,
@@ -332,6 +409,9 @@ export default function MyReceipts() {
 
       const list = (data ?? []) as unknown as ReceiptRow[];
       setRows(list);
+
+      // ✅ load branch names (for PDF)
+      fetchBranchNamesForRows(list).catch(() => {});
 
       // Build name map for approvers/rejectors
       const ids = new Set<string>();
@@ -364,10 +444,17 @@ export default function MyReceipts() {
       });
       setRows([]);
       setUserNameMap(new Map());
+      setBranchNameMap(new Map());
     } finally {
       setLoading(false);
     }
   };
+
+  // load company whenever profile changes
+  useEffect(() => {
+    fetchCompany().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(profile as any)?.company_id]);
 
   useEffect(() => {
     fetchMine();
@@ -414,9 +501,12 @@ export default function MyReceipts() {
         .join(' ')
         .toLowerCase();
 
-      return car.includes(s) || notes.includes(s) || itemsText.includes(s);
+      const branchText = getBranchLabel(r.branch_id).toLowerCase();
+
+      return car.includes(s) || notes.includes(s) || itemsText.includes(s) || branchText.includes(s);
     });
-  }, [rows, search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, search, branchNameMap]);
 
   const statusBadge = (s: ReceiptStatus) => {
     if (s === 'pending') return <Badge className="bg-yellow-500">Pending</Badge>;
@@ -424,15 +514,23 @@ export default function MyReceipts() {
     return <Badge className="bg-red-500">Rejected</Badge>;
   };
 
-  // ✅ Direct-download PDF + Waybill image embedding
+  // ✅ Direct-download PDF + Waybill image embedding + Company + Branch + Short User ID
   const exportReceiptPdf = async (r: ReceiptRow) => {
     if (!user) return;
 
     setExporting(r.id, true);
 
     try {
-      const brand = 'Philuz Appz';
+      const companyName = company?.name || 'Philuz Appz';
+      const companyAddress = company?.address || '';
+      const companyPhone = company?.phone || '';
+      const companyEmail = company?.email || '';
+      const companyTaxId = company?.tax_id || '';
+      const footerText = company?.receipt_footer || `${companyName}`;
+
       const staffName = profile?.full_name || 'Unknown';
+      const shortUserId = (user.id || '').replace(/-/g, '').slice(0, 8).toUpperCase();
+      const branchText = getBranchLabel(r.branch_id);
 
       const adminName =
         r.status === 'approved'
@@ -452,7 +550,28 @@ export default function MyReceipts() {
 
       // Header
       doc.setFontSize(14);
-      doc.text(`${brand} — Stock Receipt`, 40, 40);
+      doc.text(`${companyName} — Stock Receipt`, 40, 40);
+
+      doc.setFontSize(9);
+      doc.setTextColor(71, 85, 105);
+
+      const line1 = [companyAddress].filter(Boolean).join(' • ');
+      const line2 = [companyPhone, companyEmail].filter(Boolean).join(' • ');
+      const line3 = companyTaxId ? `Tax ID: ${companyTaxId}` : '';
+
+      let headerY = 54;
+      if (line1) {
+        doc.text(line1, 40, headerY, { maxWidth: 520 });
+        headerY += 12;
+      }
+      if (line2) {
+        doc.text(line2, 40, headerY, { maxWidth: 520 });
+        headerY += 12;
+      }
+      if (line3) {
+        doc.text(line3, 40, headerY, { maxWidth: 520 });
+        headerY += 12;
+      }
 
       // Status pill-like
       const [cr, cg, cb] = statusColor(r.status);
@@ -464,18 +583,21 @@ export default function MyReceipts() {
 
       doc.setTextColor(15, 23, 42);
       doc.setFontSize(10);
-      doc.text(`Car Number: ${r.car_number}`, 40, 70);
-      doc.text(`Captured At: ${formatDate(r.created_at)}`, 40, 86);
-      doc.text(`Received By: ${staffName}`, 40, 102);
-      doc.text(`Admin: ${adminName}`, 40, 118);
-      doc.text(`Decision Date: ${decisionDate}`, 40, 134);
+
+      const metaStartY = Math.max(70, headerY + 8);
+      doc.text(`Branch: ${branchText}`, 40, metaStartY);
+      doc.text(`Car Number: ${r.car_number}`, 40, metaStartY + 16);
+      doc.text(`Captured At: ${formatDate(r.created_at)}`, 40, metaStartY + 32);
+      doc.text(`Received By: ${staffName} (${shortUserId})`, 40, metaStartY + 48);
+      doc.text(`Admin: ${adminName}`, 40, metaStartY + 64);
+      doc.text(`Decision Date: ${decisionDate}`, 40, metaStartY + 80);
 
       // Notes
       const notesText = r.notes?.trim() ? r.notes.trim() : '—';
-      doc.text(`Notes: ${notesText}`, 40, 152, { maxWidth: 520 });
+      doc.text(`Notes: ${notesText}`, 40, metaStartY + 100, { maxWidth: 520 });
 
       // Rejection reason (if any)
-      let startY = 175;
+      let startY = metaStartY + 125;
       if (r.status === 'rejected') {
         doc.setTextColor(185, 28, 28);
         doc.text(`Rejection Reason: ${r.rejection_reason || '—'}`, 40, startY, { maxWidth: 520 });
@@ -496,7 +618,7 @@ export default function MyReceipts() {
       const totalQty = items.reduce((sum, it) => sum + Number(it.quantity || 0), 0);
 
       autoTable(doc, {
-        startY: Math.max(200, startY + 10),
+        startY: Math.max(startY + 15, 200),
         head: [['#', 'Product', 'SKU', 'Unit', 'Qty']],
         body: body.length ? body : [['—', 'No items found', '—', '—', '—']],
         styles: { fontSize: 9 },
@@ -518,17 +640,13 @@ export default function MyReceipts() {
       // ✅ Waybill embedding (best-effort)
       const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
       if (rawWaybills.length > 0) {
-        // sign first (private bucket)
         const signed = await getSignedWaybillUrls(r, 3600);
-
-        // embed only images
         const signedImages = signed.filter(isLikelyImageUrl);
 
-        const MAX_EMBED = 2; // 🔧 change to 3/4 if you want
+        const MAX_EMBED = 2;
         const toEmbed = signedImages.slice(0, MAX_EMBED);
 
         if (toEmbed.length > 0) {
-          // Title
           if (y > 720) {
             doc.addPage();
             y = 60;
@@ -542,33 +660,27 @@ export default function MyReceipts() {
           for (let i = 0; i < toEmbed.length; i++) {
             const signedUrl = toEmbed[i];
             const img = await imageUrlToDataUrl(signedUrl);
-
             if (!img) continue;
 
-            // Page break if needed
-            const maxW = 515; // a4 width minus margins
+            const maxW = 515;
             const maxH = 300;
 
-            // compute scaled size keeping aspect ratio
             const w = img.width || 1200;
             const h = img.height || 800;
             const scale = Math.min(maxW / w, maxH / h, 1);
             const drawW = Math.floor(w * scale);
             const drawH = Math.floor(h * scale);
 
-            // if not enough space, new page
             if (y + drawH + 30 > 820) {
               doc.addPage();
               y = 60;
             }
 
-            // small label
             doc.setFontSize(9);
             doc.setTextColor(100, 116, 139);
             doc.text(`Waybill ${i + 1} of ${toEmbed.length}`, 40, y + 10);
             doc.setTextColor(15, 23, 42);
 
-            // draw image
             try {
               doc.addImage(img.dataUrl, img.format, 40, y + 16, drawW, drawH, undefined, 'FAST');
               y = y + 16 + drawH + 18;
@@ -577,7 +689,6 @@ export default function MyReceipts() {
             }
           }
 
-          // note
           doc.setFontSize(8);
           doc.setTextColor(100, 116, 139);
           doc.text(
@@ -594,7 +705,7 @@ export default function MyReceipts() {
       // Footer
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
-      doc.text(`${brand} • Generated: ${new Date().toLocaleString()}`, 40, 820);
+      doc.text(`${footerText} • Generated: ${new Date().toLocaleString()}`, 40, 820);
 
       const filename = `MyStockReceipt-${r.car_number}-${r.status}-${new Date().toISOString().slice(0, 10)}.pdf`;
       forceDownloadPdf(doc, filename);
@@ -615,7 +726,7 @@ export default function MyReceipts() {
         <div>
           <h1 className="text-2xl font-bold text-white">My Stock Receipts</h1>
           <p className="text-slate-400">
-            Brand: <b>Philuz Appz</b> • Receipts you captured (pending / approved / rejected)
+            Company: <b>{company?.name || 'Philuz Appz'}</b> • Receipts you captured (pending / approved / rejected)
           </p>
         </div>
 
@@ -649,7 +760,7 @@ export default function MyReceipts() {
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Car number, notes, product..."
+              placeholder="Car number, notes, product, branch..."
               className="pl-10 bg-slate-800 border-slate-700 text-white"
             />
           </div>
@@ -670,6 +781,7 @@ export default function MyReceipts() {
             <TableHeader>
               <TableRow className="border-slate-700">
                 <TableHead className="text-slate-400">Car #</TableHead>
+                <TableHead className="text-slate-400">Branch</TableHead>
                 <TableHead className="text-slate-400">Captured At</TableHead>
                 <TableHead className="text-slate-400">Items</TableHead>
                 <TableHead className="text-slate-400">Total Qty</TableHead>
@@ -682,13 +794,13 @@ export default function MyReceipts() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-slate-400 py-10">
+                  <TableCell colSpan={8} className="text-center text-slate-400 py-10">
                     Loading...
                   </TableCell>
                 </TableRow>
               ) : filtered.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-slate-400 py-10">
+                  <TableCell colSpan={8} className="text-center text-slate-400 py-10">
                     No receipts found.
                   </TableCell>
                 </TableRow>
@@ -703,6 +815,7 @@ export default function MyReceipts() {
                     <Fragment key={r.id}>
                       <TableRow className="border-slate-700">
                         <TableCell className="text-white font-medium">{r.car_number}</TableCell>
+                        <TableCell className="text-slate-300">{getBranchLabel(r.branch_id)}</TableCell>
                         <TableCell className="text-slate-300">{formatDate(r.created_at)}</TableCell>
                         <TableCell className="text-slate-300">{r.items?.length || 0}</TableCell>
                         <TableCell className="text-slate-300">{Number(totalQty).toLocaleString()}</TableCell>
@@ -746,8 +859,12 @@ export default function MyReceipts() {
 
                       {isOpen && (
                         <TableRow className="border-slate-700">
-                          <TableCell colSpan={7} className="p-0">
+                          <TableCell colSpan={8} className="p-0">
                             <div className="bg-slate-900/40 border-t border-slate-700 p-4 space-y-3">
+                              <div className="text-sm text-slate-300">
+                                <span className="text-slate-400">Branch:</span> {getBranchLabel(r.branch_id)}
+                              </div>
+
                               <div className="text-sm text-slate-300">
                                 <span className="text-slate-400">Notes:</span> {r.notes || '—'}
                               </div>
