@@ -42,31 +42,21 @@ type BranchMini = {
   email: string | null;
 };
 
-function escapeHtml(str: string) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-function money(n: number) {
-  return Number(n || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
 export default function DailySalesReport() {
   const { toast } = useToast();
-  const { profile, activeBranchId } = useAuth() as any;
+  const { profile, activeBranchId } = useAuth() as any; // keep as any in case your hook typing differs
 
   const [loading, setLoading] = useState(true);
 
   // ✅ Date range (yyyy-mm-dd)
-  const [dateFrom, setDateFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
-  const [dateTo, setDateTo] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [dateFrom, setDateFrom] = useState<string>(() => {
+    const d = new Date();
+    return d.toISOString().slice(0, 10);
+  });
+  const [dateTo, setDateTo] = useState<string>(() => {
+    const d = new Date();
+    return d.toISOString().slice(0, 10);
+  });
 
   const [rows, setRows] = useState<Row[]>([]);
 
@@ -95,13 +85,13 @@ export default function DailySalesReport() {
     return parts.length ? parts.join(' • ') : '—';
   };
 
-  const companyId = (profile as any)?.company_id ?? null;
-  const branchId = activeBranchId ?? (profile as any)?.branch_id ?? null;
-
   // ----------------------------
   // Load company + branch
   // ----------------------------
   useEffect(() => {
+    const companyId = (profile as any)?.company_id ?? null;
+    const branchId = activeBranchId ?? (profile as any)?.branch_id ?? null;
+
     if (!companyId) {
       setCompany(null);
       setBranch(null);
@@ -122,6 +112,7 @@ export default function DailySalesReport() {
         setCompany(null);
       }
 
+      // Branch is optional — only load if we have an id
       if (!branchId) {
         setBranch(null);
         return;
@@ -140,36 +131,12 @@ export default function DailySalesReport() {
         setBranch(null);
       }
     })();
-  }, [companyId, branchId]);
+  }, [(profile as any)?.company_id, (profile as any)?.branch_id, activeBranchId]);
 
   // ----------------------------
-  // Fetch report data (✅ branch-filtered)
+  // Fetch report data
   // ----------------------------
   const fetchReport = async () => {
-    // ✅ guard: branch required
-    if (!branchId) {
-      setRows([]);
-      setLoading(false);
-      toast({
-        title: 'Branch not set',
-        description: 'No branch is selected for this user. Please contact admin.',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    // ✅ guard: dates must exist
-    if (!dateFrom || !dateTo) {
-      setRows([]);
-      setLoading(false);
-      toast({
-        title: 'Pick a date range',
-        description: 'Please select both From and To dates.',
-        variant: 'destructive',
-      });
-      return;
-    }
-
     setLoading(true);
 
     try {
@@ -181,11 +148,10 @@ export default function DailySalesReport() {
           product_id,
           quantity,
           unit_price,
-          sale:sales!inner(id, created_at, status, branch_id),
+          sale:sales!inner(id, created_at, status),
           product:products(id, name, sku)
         `
         )
-        .eq('sale.branch_id', branchId) // ✅ FIX: only this branch
         .gte('sale.created_at', toStartISO(dateFrom))
         .lte('sale.created_at', toEndISO(dateTo));
 
@@ -249,7 +215,7 @@ export default function DailySalesReport() {
   useEffect(() => {
     fetchReport();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateFrom, dateTo, branchId]);
+  }, [dateFrom, dateTo]);
 
   const totals = useMemo(() => {
     const totalQty = rows.reduce((s, r) => s + (r.qty_sold || 0), 0);
@@ -274,7 +240,8 @@ export default function DailySalesReport() {
       ...rows.map((r) =>
         headers
           .map((h) => {
-            const val = h === 'revenue' ? Number(r.revenue || 0).toFixed(2) : (r as any)[h];
+            const val =
+              h === 'revenue' ? Number(r.revenue || 0).toFixed(2) : (r as any)[h];
             return esc(val);
           })
           .join(',')
@@ -296,7 +263,8 @@ export default function DailySalesReport() {
   };
 
   // ----------------------------
-  // Export PDF (BRANDED)
+  // ✅ Export PDF (BRANDED)
+  // Print-friendly window → Save as PDF
   // ----------------------------
   const exportPDF = () => {
     if (!rows.length) {
@@ -312,6 +280,7 @@ export default function DailySalesReport() {
     const branchName = branch?.name?.trim() || '';
     const branchLine = branchName ? `Branch: ${branchName}` : '';
 
+    // Prefer branch contact if available, else company contact
     const contactLine =
       branch && (branch.address || branch.phone || branch.email)
         ? formatContactLine({
@@ -461,7 +430,9 @@ export default function DailySalesReport() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">Daily Sales Report</h1>
-          <p className="text-slate-400">Total quantity sold per item per day (with revenue)</p>
+          <p className="text-slate-400">
+            Total quantity sold per item per day (with revenue)
+          </p>
           <p className="text-slate-500 text-sm">
             Company: <b className="text-slate-200">{company?.name || '—'}</b>
             {branch?.name ? (
@@ -527,13 +498,11 @@ export default function DailySalesReport() {
             <Button
               variant="outline"
               onClick={() => {
-                // ✅ FIX: do NOT set empty (breaks ISO filters)
-                const today = new Date().toISOString().slice(0, 10);
-                setDateFrom(today);
-                setDateTo(today);
+                setDateFrom('');
+                setDateTo('');
               }}
             >
-              Reset
+              Clear
             </Button>
           </div>
         </CardContent>
@@ -545,7 +514,8 @@ export default function DailySalesReport() {
           <CardTitle className="text-white flex items-center justify-between">
             <span>Results</span>
             <span className="text-sm text-slate-400">
-              Total Qty: {totals.totalQty.toLocaleString()} • Total Revenue: {money(totals.totalRevenue)}
+              Total Qty: {totals.totalQty.toLocaleString()} • Total Revenue:{' '}
+              {money(totals.totalRevenue)}
             </span>
           </CardTitle>
         </CardHeader>
@@ -590,4 +560,21 @@ export default function DailySalesReport() {
       </Card>
     </div>
   );
+}
+
+// Small helper to prevent HTML breaking in print window
+function escapeHtml(str: string) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function money(n: number) {
+  return Number(n || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
