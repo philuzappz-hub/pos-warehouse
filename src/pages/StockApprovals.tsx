@@ -89,7 +89,6 @@ type AuditRow = {
   created_at: string;
 };
 
-// include branch address/contact for admin export
 type BranchMini = {
   id: string;
   name: string;
@@ -104,7 +103,7 @@ type CompanyMini = {
   address: string | null;
   phone: string | null;
   email: string | null;
-  logo_url: string | null; // not used for now (we use initials)
+  logo_url: string | null;
   tax_id: string | null;
   receipt_footer: string | null;
 };
@@ -120,7 +119,7 @@ function safeUpper(v?: string | null) {
   return (v || "").toString().toUpperCase();
 }
 
-// short user id for receipts/audit (stable + small)
+// ✅ short user id for receipts/audit (stable + small)
 function shortUserId(userId?: string | null) {
   const s = (userId || "").replace(/-/g, "");
   if (!s) return "USR-—";
@@ -146,7 +145,7 @@ function forceDownloadPdf(doc: jsPDF, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// normalize jsonb -> string[]
+// ✅ normalize jsonb -> string[]
 function normalizeWaybillUrls(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
@@ -161,7 +160,7 @@ function normalizeWaybillUrls(v: any): string[] {
 }
 
 /**
- * createSignedUrl expects bucket-relative PATH (not full URL)
+ * ✅ createSignedUrl expects bucket-relative PATH (not full URL)
  */
 function extractWaybillPath(urlOrPath: string): string {
   const s = (urlOrPath || "").trim();
@@ -239,7 +238,7 @@ function fitIntoBox(
 }
 
 // -----------------------------
-// PDF helpers
+// ✅ PDF helpers
 // -----------------------------
 function getInitials(name: string) {
   const parts = (name || "")
@@ -278,7 +277,7 @@ function drawWatermark(doc: jsPDF, text: string) {
   } catch {}
 }
 
-// Contact parts based on branch/all selection
+// ✅ Contact parts based on branch/all selection
 function getHeaderContactParts(
   company: CompanyMini | null,
   branch: BranchMini | null,
@@ -310,10 +309,8 @@ function getHeaderContactParts(
 }
 
 /**
- * UPDATED:
- * - Wraps contact text
- * - Draws divider under the final wrapped line
- * - Returns the Y coordinate you should start drawing content from
+ * ✅ FIXED: Dynamic header height
+ * Returns bottomY so caller can place the next content safely below header
  */
 function drawCompanyHeader(
   doc: jsPDF,
@@ -321,7 +318,7 @@ function drawCompanyHeader(
   titleRight: string,
   status: ReceiptStatus,
   contactParts: string[]
-): number {
+): { bottomY: number } {
   const companyName = company?.name || "Company";
   const initials = getInitials(companyName);
 
@@ -337,32 +334,16 @@ function drawCompanyHeader(
   doc.setFontSize(15);
   doc.text(`${companyName} — ${titleRight}`, 80, 44);
 
-  // contacts (wrapped) — use real jsPDF line height
-  const contactFontSize = 9.5;
-  doc.setFontSize(contactFontSize);
+  // contacts (wrapped)
+  doc.setFontSize(9.5);
   doc.setTextColor(71, 85, 105);
 
-  const contactY = 60;
   const line = contactParts.length ? contactParts.join(" • ") : "—";
+  const wrapped = doc.splitTextToSize(line, 380);
 
-  // Use more width so it wraps like admin (cleaner)
-  const wrapped = doc.splitTextToSize(line, 470);
-
+  const contactY = 60;
+  const lineH = 12; // <- key for consistent spacing
   doc.text(wrapped, 80, contactY);
-
-  // Real line height from jsPDF
-  const lineHeightFactor =
-    (doc as any).getLineHeightFactor?.() ??
-    (doc as any).internal?.getLineHeightFactor?.() ??
-    1.15;
-
-  const lineHeight = contactFontSize * lineHeightFactor;
-
-  // Divider should be below the LAST wrapped line + padding
-  const dividerY = contactY + wrapped.length * lineHeight + 18;
-
-  doc.setDrawColor(226, 232, 240);
-  doc.line(40, dividerY, 555, dividerY);
 
   // status chip
   const statusText = safeUpper(status);
@@ -376,9 +357,15 @@ function drawCompanyHeader(
   doc.setFontSize(10);
   doc.text(statusText, 500, 45, { align: "center" });
 
-  return dividerY;
-}
+  // divider goes BELOW wrapped lines
+  const lastLineY = contactY + (wrapped.length - 1) * lineH;
+  const dividerY = lastLineY + 14;
 
+  doc.setDrawColor(226, 232, 240);
+  doc.line(40, dividerY, 555, dividerY);
+
+  return { bottomY: dividerY };
+}
 
 export default function StockApprovals() {
   const { toast } = useToast();
@@ -394,6 +381,7 @@ export default function StockApprovals() {
 
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
   const [branchMap, setBranchMap] = useState<Map<string, BranchMini>>(new Map());
+
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [auditMap, setAuditMap] = useState<Map<string, AuditRow[]>>(new Map());
 
@@ -570,7 +558,7 @@ export default function StockApprovals() {
       setReceipts(rows);
 
       if (isAdmin) fetchBranchNamesForReceipts(rows).catch(() => {});
-      else setBranchMap(new Map());
+      else setBranchMap(new Map()); // staff doesn't need branchMap for header now
 
       const ids = new Set<string>();
       rows.forEach((r) => {
@@ -703,7 +691,13 @@ export default function StockApprovals() {
           .join(" ")
           .toLowerCase() || "";
 
-      return car.includes(s) || notes.includes(s) || creator.includes(s) || itemsText.includes(s) || branchText.includes(s);
+      return (
+        car.includes(s) ||
+        notes.includes(s) ||
+        creator.includes(s) ||
+        itemsText.includes(s) ||
+        branchText.includes(s)
+      );
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [receipts, search, userNameMap, branchMap]);
@@ -827,7 +821,7 @@ export default function StockApprovals() {
   };
 
   // -----------------------------
-  // PDF EXPORTS
+  // ✅ PDF EXPORTS
   // -----------------------------
   const exportReceiptPdf = async (r: ReceiptRow, includeAudit: boolean) => {
     let audit = auditMap.get(r.id) || [];
@@ -855,16 +849,16 @@ export default function StockApprovals() {
     const wm = r.status === "pending" ? "DRAFT" : "STAFF COPY";
     drawWatermark(doc, wm);
 
-    // STAFF REQUEST: always show full address (clean)
+    // ✅ STAFF: we will always show clean full company address (wrapped) like admin
     const contactParts = getHeaderContactParts(company, null, "all");
 
-    // header now returns bottomY
-   const headerBottomY = drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
+    // header (dynamic)
+    const header = drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
 
-    // Receipt no + generated (placed below header safely)
+    // meta section (dynamic Y)
+    const metaY = header.bottomY + 18;
+
     const receiptNo = receiptNumber("SR", r.created_at, r.id);
-    const metaY = headerBottomY + 28;
-
     doc.setFontSize(9);
     doc.setTextColor(71, 85, 105);
     doc.text(`Receipt No: ${receiptNo}`, 40, metaY);
@@ -888,7 +882,9 @@ export default function StockApprovals() {
 
     const leftX = 40;
     const rightX = 320;
-    let y = metaY + 32;
+
+    // details block start
+    let y = metaY + 26;
 
     doc.text(`Branch: ${branchText}`, leftX, y);
     doc.text(`Car Number: ${r.car_number}`, leftX, y + 16);
@@ -899,7 +895,6 @@ export default function StockApprovals() {
       doc.setTextColor(71, 85, 105);
       doc.text(`Notes: ${r.notes}`, leftX, y + 68, { maxWidth: 520 });
       doc.setTextColor(15, 23, 42);
-      y += 18;
     }
 
     if (r.status === "approved") {
@@ -916,6 +911,9 @@ export default function StockApprovals() {
       doc.text(`Pending approval`, rightX, y);
       doc.setTextColor(15, 23, 42);
     }
+
+    // table start after details
+    const tableStartY = y + 90;
 
     const items = r.items || [];
     const body = items.map((it) => {
@@ -935,7 +933,7 @@ export default function StockApprovals() {
     });
 
     autoTable(doc, {
-      startY: y + 80,
+      startY: tableStartY,
       head: [["Product", "SKU", "Unit", "Qty Received", "Current Stock", "After Approval"]],
       body: body.length ? body : [["—", "—", "—", "—", "—", "—"]],
       styles: { fontSize: 9, cellPadding: 4 },
@@ -948,7 +946,88 @@ export default function StockApprovals() {
       },
     });
 
-    let finalY = (doc as any).lastAutoTable?.finalY || y + 140;
+    let afterTableY = (doc as any).lastAutoTable?.finalY || tableStartY + 60;
+
+    // Waybill embed preview (up to 2)
+    const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
+    if (rawWaybills.length > 0) {
+      const signed: string[] = [];
+      for (const u of rawWaybills.slice(0, 2)) {
+        const path = extractWaybillPath(u);
+        if (!path || path.startsWith("http")) continue;
+
+        const { data } = await supabase.storage.from("waybills").createSignedUrl(path, 3600);
+        if (data?.signedUrl) signed.push(data.signedUrl);
+      }
+
+      if (signed.length > 0) {
+        afterTableY += 26;
+        if (afterTableY > 700) {
+          doc.addPage();
+          drawWatermark(doc, wm);
+          afterTableY = 60;
+        }
+
+        doc.setFontSize(11);
+        doc.setTextColor(15, 23, 42);
+        doc.text(`Waybill Images (Embedded)`, 40, afterTableY);
+
+        doc.setFontSize(9);
+        doc.setTextColor(71, 85, 105);
+        doc.text(
+          `Showing ${signed.length} of ${rawWaybills.length} (signed links expire ~1 hour)`,
+          40,
+          afterTableY + 14
+        );
+
+        afterTableY += 26;
+
+        const boxW = 250;
+        const boxH = 180;
+        const gap = 20;
+
+        for (let i = 0; i < signed.length; i++) {
+          const col = i % 2;
+          const row = Math.floor(i / 2);
+
+          const x = 40 + col * (boxW + gap);
+          const top = afterTableY + row * (boxH + 26);
+
+          if (top + boxH > 770) {
+            doc.addPage();
+            drawWatermark(doc, wm);
+            afterTableY = 60;
+          }
+
+          doc.setDrawColor(203, 213, 225);
+          doc.setFillColor(248, 250, 252);
+          doc.roundedRect(x, top, boxW, boxH, 10, 10, "FD");
+
+          const imgInfo = await imageUrlToDataUrl(signed[i]);
+          if (imgInfo) {
+            const natural = await getImageNaturalSize(imgInfo.dataUrl);
+            const nW = natural?.w || 1000;
+            const nH = natural?.h || 700;
+            const fitted = fitIntoBox(nW, nH, boxW - 16, boxH - 16);
+
+            const ix = x + (boxW - fitted.w) / 2;
+            const iy = top + (boxH - fitted.h) / 2;
+
+            try {
+              doc.addImage(imgInfo.dataUrl, imgInfo.format, ix, iy, fitted.w, fitted.h, undefined, "FAST");
+            } catch {}
+          } else {
+            doc.setTextColor(100, 116, 139);
+            doc.setFontSize(10);
+            doc.text("Could not embed image", x + boxW / 2, top + boxH / 2, { align: "center" });
+          }
+
+          doc.setTextColor(71, 85, 105);
+          doc.setFontSize(9);
+          doc.text(`Waybill ${i + 1}`, x, top + boxH + 16);
+        }
+      }
+    }
 
     // Audit (optional)
     if (includeAudit) {
@@ -961,19 +1040,21 @@ export default function StockApprovals() {
         a.note || "",
       ]);
 
-      finalY += 18;
-      if (finalY > 720) {
+      let y2 = (doc as any).lastAutoTable?.finalY || afterTableY;
+      y2 += 20;
+
+      if (y2 > 720) {
         doc.addPage();
         drawWatermark(doc, wm);
-        finalY = 60;
+        y2 = 60;
       }
 
       doc.setFontSize(11);
       doc.setTextColor(15, 23, 42);
-      doc.text("Audit Log (latest)", 40, finalY);
+      doc.text("Audit Log (latest)", 40, y2);
 
       autoTable(doc, {
-        startY: finalY + 10,
+        startY: y2 + 10,
         head: [["When", "Action", "From", "To", "By", "Note"]],
         body: auditRows.length ? auditRows : [["—", "No audit entries", "—", "—", "—", "—"]],
         styles: { fontSize: 8, cellPadding: 3 },
@@ -1003,22 +1084,22 @@ export default function StockApprovals() {
 
     drawWatermark(doc, "ADMIN COPY");
 
-    // admin logic stays:
+    // ✅ keep your existing admin logic (branch selected => branch contact, all => company)
     const selectedBranch = activeBranchId ? branchMap.get(activeBranchId) || null : null;
     const contactParts = getHeaderContactParts(company, selectedBranch, activeBranchId ? "branch" : "all");
 
-    const headerBottomY = drawCompanyHeader(doc, company, "Stock Receipts Export", tab, contactParts);
+    const header = drawCompanyHeader(doc, company, "Stock Receipts Export", tab, contactParts);
+
+    const infoY = header.bottomY + 26;
 
     doc.setFontSize(10);
     doc.setTextColor(71, 85, 105);
-    const metaY = headerBottomY + 26;
-
     doc.text(
       `Tab: ${tab.toUpperCase()} • Branch: ${
         isAdmin ? (activeBranchId ? getBranchLabel(activeBranchId) : "All branches") : "—"
       } • Exported: ${new Date().toLocaleString()}`,
       40,
-      metaY
+      infoY
     );
 
     const includeBranchCol = isAdmin && !activeBranchId;
@@ -1046,7 +1127,7 @@ export default function StockApprovals() {
       : [["Car #", "Captured By", "Captured At", "Lines", "Total Qty", "Status", "Waybill"]];
 
     autoTable(doc, {
-      startY: metaY + 22,
+      startY: infoY + 22,
       head,
       body,
       styles: { fontSize: 9 },
@@ -1271,7 +1352,12 @@ export default function StockApprovals() {
                                   {r.status === "approved" && (
                                     <>
                                       <span className="text-slate-400">Approved By:</span>{" "}
-                                      {r.approved_by ? formatUserLabel(userNameMap.get(String(r.approved_by)) || "Unknown", String(r.approved_by)) : "—"}
+                                      {r.approved_by
+                                        ? formatUserLabel(
+                                            userNameMap.get(String(r.approved_by)) || "Unknown",
+                                            String(r.approved_by)
+                                          )
+                                        : "—"}
                                       <br />
                                       <span className="text-slate-400">Approved At:</span> {fmtDate(r.approved_at)}
                                     </>
@@ -1280,7 +1366,12 @@ export default function StockApprovals() {
                                   {r.status === "rejected" && (
                                     <>
                                       <span className="text-slate-400">Rejected By:</span>{" "}
-                                      {r.rejected_by ? formatUserLabel(userNameMap.get(String(r.rejected_by)) || "Unknown", String(r.rejected_by)) : "—"}
+                                      {r.rejected_by
+                                        ? formatUserLabel(
+                                            userNameMap.get(String(r.rejected_by)) || "Unknown",
+                                            String(r.rejected_by)
+                                          )
+                                        : "—"}
                                       <br />
                                       <span className="text-slate-400">Rejected At:</span> {fmtDate(r.rejected_at)}
                                       <br />
@@ -1382,7 +1473,9 @@ export default function StockApprovals() {
 
                                         <div className="text-slate-400">
                                           By:{" "}
-                                          {a.actor_id ? formatUserLabel(userNameMap.get(a.actor_id) || "Unknown", a.actor_id) : "—"}
+                                          {a.actor_id
+                                            ? formatUserLabel(userNameMap.get(a.actor_id) || "Unknown", a.actor_id)
+                                            : "—"}
                                         </div>
                                       </div>
                                     ))}

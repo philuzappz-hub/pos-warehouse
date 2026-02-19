@@ -42,6 +42,23 @@ type ReceiptData = {
   total_amount: number;
 };
 
+type CompanyMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  tax_id: string | null;
+};
+
+type BranchMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+};
+
 function escapeHtml(str: string) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -56,6 +73,21 @@ function money(n: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+}
+
+// Display helper: convert "233xxxxxxxxx" => "0xxxxxxxxx"
+function displayGhPhone(v?: string | null) {
+  const s = String(v ?? '').trim().replace(/\s+/g, '');
+  if (!s) return '';
+  if (/^233\d{9}$/.test(s)) return `0${s.slice(3)}`;
+  return s;
+}
+
+function cleanLine(parts: Array<string | null | undefined>) {
+  return parts
+    .map((p) => (p ?? '').toString().trim())
+    .filter(Boolean)
+    .join(' • ');
 }
 
 // ✅ escape hatch for new RPCs not included in generated Supabase TS types
@@ -137,10 +169,54 @@ export default function POS() {
   const [customerPhone, setCustomerPhone] = useState('');
   const [processing, setProcessing] = useState(false);
 
+  // ✅ company + branch for receipt header
+  const [company, setCompany] = useState<CompanyMini | null>(null);
+  const [branch, setBranch] = useState<BranchMini | null>(null);
+
   useEffect(() => {
     fetchProducts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ✅ load company + branch details (for printing header)
+  useEffect(() => {
+    const companyId = (profile as any)?.company_id ?? null;
+    const branchId = (profile as any)?.active_branch_id ?? (profile as any)?.branch_id ?? null;
+
+    (async () => {
+      try {
+        if (companyId) {
+          const { data, error } = await (supabase as any)
+            .from('companies')
+            .select('id,name,address,phone,email,tax_id')
+            .eq('id', companyId)
+            .maybeSingle();
+          if (!error) setCompany((data as CompanyMini) || null);
+          else setCompany(null);
+        } else {
+          setCompany(null);
+        }
+      } catch {
+        setCompany(null);
+      }
+
+      try {
+        if (branchId) {
+          const { data, error } = await (supabase as any)
+            .from('branches')
+            .select('id,name,address,phone,email')
+            .eq('id', branchId)
+            .maybeSingle();
+          if (!error) setBranch((data as BranchMini) || null);
+          else setBranch(null);
+        } else {
+          setBranch(null);
+        }
+      } catch {
+        setBranch(null);
+      }
+    })();
+  }, [(profile as any)?.company_id, (profile as any)?.active_branch_id, (profile as any)?.branch_id]);
 
   // realtime products refresh
   useEffect(() => {
@@ -331,14 +407,28 @@ export default function POS() {
   };
 
   const buildPrintHtml = (data: ReceiptData, saleId: string) => {
-    const brand = 'Philuz Appz';
+    // ✅ Use company + branch for header (NO Philuz at top)
+    const companyName = company?.name?.trim() || 'Company';
+    const branchName =
+      branch?.name?.trim() || (profile as any)?.branch_name?.trim() || 'Branch';
+
+    const addr = (branch?.address || company?.address || '').trim();
+    const phone = displayGhPhone(branch?.phone || company?.phone || '');
+    const email = (branch?.email || company?.email || '').trim();
+
+    const contactLine = cleanLine([
+      addr || null,
+      phone ? `Tel: ${phone}` : null,
+      email || null,
+    ]);
+
     const receiptNumber = escapeHtml(data.receipt_number);
     const now = new Date(data.created_at || Date.now()).toLocaleString();
     const totalPaid = money(data.total_amount);
 
     const customerLine =
       (data.customer_name ? escapeHtml(data.customer_name) : 'Walk-in') +
-      (data.customer_phone ? ` • ${escapeHtml(data.customer_phone)}` : '');
+      (data.customer_phone ? ` • ${escapeHtml(displayGhPhone(data.customer_phone))}` : '');
 
     const rowsHtml = data.items
       .map((it) => {
@@ -357,12 +447,20 @@ export default function POS() {
       })
       .join('');
 
+    const headerHtml = `
+      <div class="hdr">
+        <div class="co">${escapeHtml(companyName)}</div>
+        <div class="br">${escapeHtml(branchName)}</div>
+        ${contactLine ? `<div class="ct">${escapeHtml(contactLine)}</div>` : ''}
+      </div>
+      <div class="dash"></div>
+    `;
+
     const customerSalesCopy = `
       <div class="paper">
-        <div class="brand">${brand}</div>
+        ${headerHtml}
         <div class="sub">Sales Receipt</div>
-        <div class="copyTitle">CUSTOMER COPY (NO ITEMS)</div>
-        <div class="dash"></div>
+        <div class="copyTitle">Customer Copy (No Items)</div>
 
         <div class="meta">
           <div><b>Receipt:</b> ${receiptNumber}</div>
@@ -376,7 +474,7 @@ export default function POS() {
         <table>
           <tbody>
             <tr class="totalRow">
-              <td>TOTAL PAID</td>
+              <td>Total Paid</td>
               <td class="r">GHS ${totalPaid}</td>
             </tr>
           </tbody>
@@ -397,10 +495,9 @@ export default function POS() {
 
     const cashierSalesCopy = `
       <div class="paper">
-        <div class="brand">${brand}</div>
+        ${headerHtml}
         <div class="sub">Sales Receipt</div>
-        <div class="copyTitle">CASHIER COPY (FULL)</div>
-        <div class="dash"></div>
+        <div class="copyTitle">Cashier Copy (Full)</div>
 
         <div class="meta">
           <div><b>Receipt:</b> ${receiptNumber}</div>
@@ -428,7 +525,7 @@ export default function POS() {
         <table>
           <tbody>
             <tr class="totalRow">
-              <td colspan="3">TOTAL</td>
+              <td colspan="3">Total</td>
               <td class="r">GHS ${totalPaid}</td>
             </tr>
           </tbody>
@@ -449,10 +546,9 @@ export default function POS() {
 
     const warehouseCoupon = (label: string) => `
       <div class="paper">
-        <div class="brand">${brand}</div>
+        ${headerHtml}
         <div class="sub">Warehouse Pickup Coupon</div>
         <div class="copyTitle">${escapeHtml(label)}</div>
-        <div class="dash"></div>
 
         <div class="meta">
           <div><b>Receipt:</b> ${receiptNumber}</div>
@@ -522,9 +618,14 @@ export default function POS() {
               justify-content: center;
             }
             .paper { width: 340px; max-width: 340px; padding: 16px 8px; }
-            .brand { text-align:center; font-weight: 800; font-size: 18px; }
+
+            .hdr { text-align: center; }
+            .co { font-weight: 900; font-size: 16px; }
+            .br { font-weight: 800; font-size: 12px; margin-top: 2px; }
+            .ct { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.25; }
+
             .sub { text-align:center; font-size: 12px; color: var(--muted); margin-top: 2px; }
-            .copyTitle { text-align:center; font-size: 12px; font-weight: 800; margin-top: 6px; }
+            .copyTitle { text-align:center; font-size: 12px; font-weight: 800; margin-top: 6px; text-transform: none; }
             .meta { font-size: 12px; margin-top: 10px; }
             .meta div { margin: 3px 0; }
             .dash { border-bottom: 1px dashed var(--line); margin: 10px 0; }
@@ -554,8 +655,8 @@ export default function POS() {
           <div>
             ${customerSalesCopy}
             ${cashierSalesCopy}
-            ${warehouseCoupon('WAREHOUSE COUPON — COPY 1')}
-            ${warehouseCoupon('WAREHOUSE COUPON — COPY 2')}
+            ${warehouseCoupon('Warehouse Coupon — Copy 1')}
+            ${warehouseCoupon('Warehouse Coupon — Copy 2')}
           </div>
         </body>
       </html>
