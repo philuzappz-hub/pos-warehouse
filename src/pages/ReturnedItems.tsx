@@ -144,10 +144,8 @@ export default function ReturnedItems() {
   }, [(profile as any)?.company_id, activeBranchId]);
 
   useEffect(() => {
-    // initial fetch
     fetchReturns();
 
-    // realtime subscription: refresh list when returns change
     const channel = supabase
       .channel('returned-items-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'returns' }, () => {
@@ -179,27 +177,17 @@ export default function ReturnedItems() {
       query = query.eq('status', statusFilter);
     }
 
-    // ✅ date filtering on created_at
-    if (dateFrom) {
-      query = query.gte('created_at', `${dateFrom}T00:00:00.000Z`);
-    }
-    if (dateTo) {
-      query = query.lte('created_at', `${dateTo}T23:59:59.999Z`);
-    }
+    if (dateFrom) query = query.gte('created_at', `${dateFrom}T00:00:00.000Z`);
+    if (dateTo) query = query.lte('created_at', `${dateTo}T23:59:59.999Z`);
 
     const { data, error } = await query;
 
     if (error) {
-      toast({
-        title: 'Error',
-        description: error.message,
-        variant: 'destructive',
-      });
+      toast({ title: 'Error', description: error.message, variant: 'destructive' });
       setLoading(false);
       return;
     }
 
-    // Fetch initiator and approver names
     const initiatorIds = [...new Set((data || []).map((d) => d.initiated_by).filter(Boolean))] as string[];
     const approverIds = [...new Set((data || []).map((d) => d.approved_by).filter(Boolean))] as string[];
     const allUserIds = [...new Set([...initiatorIds, ...approverIds])];
@@ -241,7 +229,6 @@ export default function ReturnedItems() {
     }
   };
 
-  // ✅ GROUP RETURNS BY SALE (COUPON) so it looks like full receipt return
   const groupedReturns: GroupedReturn[] = useMemo(() => {
     const map = new Map<string, ReturnWithDetails[]>();
 
@@ -253,13 +240,11 @@ export default function ReturnedItems() {
     const result: GroupedReturn[] = [];
 
     for (const [sale_id, list] of map.entries()) {
-      // sort newest first
       const sorted = [...list].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 
       const receipt_number = sorted[0]?.sale?.receipt_number || sale_id.slice(0, 8);
       const customer_name = sorted[0]?.sale?.customer_name || null;
 
-      // status logic:
       const statuses = new Set(sorted.map((r) => r.status));
       let status: GroupedReturn['status'] = 'mixed';
       if (statuses.has('pending')) status = 'pending';
@@ -268,7 +253,6 @@ export default function ReturnedItems() {
       else if (statuses.has('approved') && !statuses.has('pending') && !statuses.has('rejected')) status = 'approved';
       else if (statuses.has('rejected') && !statuses.has('pending') && !statuses.has('approved')) status = 'rejected';
 
-      // items aggregation
       const itemMap = new Map<string, { name: string; sku?: string; qty: number }>();
       let total_qty = 0;
       const reasons: string[] = [];
@@ -286,10 +270,7 @@ export default function ReturnedItems() {
       }
 
       const items = Array.from(itemMap.values());
-
-      // initiator/approver: show latest known (from newest row)
       const initiator_name = sorted.find((r) => r.initiator?.full_name)?.initiator?.full_name || null;
-
       const approver_name = sorted.find((r) => r.approver?.full_name)?.approver?.full_name || null;
 
       result.push({
@@ -306,7 +287,6 @@ export default function ReturnedItems() {
       });
     }
 
-    // newest receipts first
     return result.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
   }, [returns]);
 
@@ -314,7 +294,6 @@ export default function ReturnedItems() {
     if (!search.trim()) return groupedReturns;
 
     const s = search.toLowerCase();
-
     return groupedReturns.filter((gr) => {
       const itemsText = gr.items.map((i) => i.name).join(' ').toLowerCase();
       const receipt = (gr.receipt_number || '').toLowerCase();
@@ -334,9 +313,7 @@ export default function ReturnedItems() {
       status: gr.status,
       total_qty: gr.total_qty,
       items_count: gr.items.length,
-      items: gr.items
-        .map((it) => `${it.name}${it.sku ? ` (${it.sku})` : ''} x${it.qty}`)
-        .join(' | '),
+      items: gr.items.map((it) => `${it.name}${it.sku ? ` (${it.sku})` : ''} x${it.qty}`).join(' | '),
       reason: gr.reasons.length === 0 ? '' : gr.reasons.length === 1 ? gr.reasons[0] : 'Multiple reasons',
       initiated_by: gr.initiator_name || '',
       approved_by: gr.approver_name || '',
@@ -363,8 +340,6 @@ export default function ReturnedItems() {
     return rows;
   };
 
-  // ✅ Export Excel - creates up to 2 sheets depending on exportScope
-  // NOTE: requires installing: npm i xlsx
   const exportExcel = async () => {
     if (!filteredGroupedReturns || filteredGroupedReturns.length === 0) {
       toast({ title: 'Nothing to export', description: 'No rows match your filters.' });
@@ -373,7 +348,6 @@ export default function ReturnedItems() {
 
     try {
       const XLSX = await import('xlsx');
-
       const wb = XLSX.utils.book_new();
 
       if (exportScope === 'summary' || exportScope === 'both') {
@@ -405,7 +379,6 @@ export default function ReturnedItems() {
     }
   };
 
-  // ✅ CSV export respecting exportScope
   const exportCSV = () => {
     if (!filteredGroupedReturns || filteredGroupedReturns.length === 0) {
       toast({ title: 'Nothing to export', description: 'No rows match your filters.' });
@@ -464,18 +437,12 @@ export default function ReturnedItems() {
       return;
     }
 
-    // both
     download(`returned-receipts-summary-${stamp}.csv`, summaryHeaders, buildSummaryRows());
     download(`returned-receipts-items-${stamp}.csv`, itemHeaders, buildItemRows());
-    toast({
-      title: 'Export complete',
-      description: 'Downloaded 2 CSV files (summary + items).',
-    });
+    toast({ title: 'Export complete', description: 'Downloaded 2 CSV files (summary + items).' });
   };
 
-  // ✅ PDF export respecting exportScope (Summary only / Items only / Both)
-  // NOTE: requires installing: npm i jspdf jspdf-autotable
-  // IMPORTANT: In Vite/ESM, use autoTable(doc, ...) NOT doc.autoTable(...)
+  // ✅ PDF export (CLEAN HEADER: no overlap)
   const exportPDF = async () => {
     if (!filteredGroupedReturns || filteredGroupedReturns.length === 0) {
       toast({ title: 'Nothing to export', description: 'No rows match your filters.' });
@@ -499,9 +466,7 @@ export default function ReturnedItems() {
       const marginX = 40;
 
       const reportTitle = `Returned Receipts`;
-      const scopeTitle =
-        exportScope === 'both' ? 'Summary + Breakdown' : exportScope === 'summary' ? 'Summary' : 'Items';
-
+      const scopeTitle = exportScope === 'both' ? 'Summary + Breakdown' : exportScope === 'summary' ? 'Summary' : 'Items';
       const now = new Date().toLocaleString();
 
       const filtersLine = [
@@ -524,44 +489,51 @@ export default function ReturnedItems() {
         Boolean
       ) as string[];
 
-      // ---------
-      // Branding helpers (header/footer on every page)
-      // ---------
-      const drawHeader = () => {
-        doc.setFontSize(14);
-        doc.text(companyName, marginX, 34);
+      const headerTextMaxWidth = pageWidth - marginX * 2;
 
-        doc.setFontSize(11);
-        doc.text(`${reportTitle} (${scopeTitle})`, marginX, 52);
+      // returns the Y where the header ends (so tables can start below it)
+      const drawHeader = () => {
+        let y = 34;
+
+        doc.setFontSize(14);
+        doc.text(companyName, marginX, y);
 
         doc.setFontSize(9);
-        doc.text(contactParts.length ? contactParts.join(' • ') : '—', marginX, 66, {
-          maxWidth: pageWidth - marginX * 2,
-        });
+        doc.text(`Generated: ${now}`, pageWidth - marginX, y, { align: 'right' });
+
+        y += 18;
+
+        doc.setFontSize(11);
+        doc.text(`${reportTitle} (${scopeTitle})`, marginX, y);
+        y += 14;
+
+        doc.setFontSize(9);
+        const contactLine = contactParts.length ? contactParts.join(' • ') : '—';
+        const contactLines = doc.splitTextToSize(contactLine, headerTextMaxWidth);
+        doc.text(contactLines, marginX, y);
+        y += contactLines.length * 12;
 
         if (branchName) {
-          doc.text(`Branch: ${branchName}`, marginX, 80, {
-            maxWidth: pageWidth - marginX * 2,
-          });
+          doc.text(`Branch: ${branchName}`, marginX, y);
+          y += 12;
         }
 
         if (filtersLine) {
-          doc.text(filtersLine, marginX, branchName ? 94 : 80, {
-            maxWidth: pageWidth - marginX * 2,
-          });
+          const filterLines = doc.splitTextToSize(filtersLine, headerTextMaxWidth);
+          doc.text(filterLines, marginX, y);
+          y += filterLines.length * 12;
         }
 
-        const lineY = filtersLine ? (branchName ? 106 : 92) : branchName ? 92 : 78;
-
-        // thin line under header
+        // divider line
         doc.setLineWidth(0.6);
-        doc.line(marginX, lineY, pageWidth - marginX, lineY);
+        doc.line(marginX, y, pageWidth - marginX, y);
+
+        return y; // bottom of header
       };
 
       const drawFooter = (pageNumber: number, totalPages: number) => {
         const y = pageHeight - 40;
 
-        // top line
         doc.setLineWidth(0.6);
         doc.line(marginX, y - 10, pageWidth - marginX, y - 10);
 
@@ -573,11 +545,8 @@ export default function ReturnedItems() {
         doc.text(pageText, pageWidth - marginX - doc.getTextWidth(pageText), y);
       };
 
-      // Start page with header
-      drawHeader();
-
-      // table should start after header area
-      const startY = 120;
+      let headerBottomY = drawHeader();
+      const startY = headerBottomY + 14;
 
       const addSummaryTable = () => {
         const rows = buildSummaryRows().map((r) => [
@@ -613,8 +582,7 @@ export default function ReturnedItems() {
             8: { cellWidth: 70 },
           },
           didDrawPage: () => {
-            // autoTable calls this on new pages — re-draw header
-            drawHeader();
+            headerBottomY = drawHeader();
           },
         });
 
@@ -653,7 +621,7 @@ export default function ReturnedItems() {
             8: { cellWidth: 70 },
           },
           didDrawPage: () => {
-            drawHeader();
+            headerBottomY = drawHeader();
           },
         });
 
@@ -661,34 +629,37 @@ export default function ReturnedItems() {
       };
 
       const addPerReceiptBreakdown = () => {
-        // One receipt per page so ALL items are clearly visible (no matter how many)
         filteredGroupedReturns.forEach((gr) => {
           doc.addPage();
-          drawHeader();
+          headerBottomY = drawHeader();
+
+          let y = headerBottomY + 18;
 
           doc.setFontSize(12);
-          doc.text(`Receipt: ${gr.receipt_number}`, marginX, 132);
+          doc.text(`Receipt: ${gr.receipt_number}`, marginX, y);
+          y += 16;
 
           doc.setFontSize(9);
           doc.text(
             `Customer: ${gr.customer_name || 'Walk-in'}   •   Status: ${gr.status}   •   Total Qty: ${gr.total_qty}`,
             marginX,
-            148,
+            y,
             { maxWidth: pageWidth - marginX * 2 }
           );
+          y += 14;
 
           if (gr.reasons.length) {
             const reasonText =
               gr.reasons.length === 1 ? gr.reasons[0] : `Multiple: ${Array.from(new Set(gr.reasons)).join(' | ')}`;
-            doc.text(`Reason(s): ${reasonText}`, marginX, 164, {
-              maxWidth: pageWidth - marginX * 2,
-            });
+            const reasonLines = doc.splitTextToSize(`Reason(s): ${reasonText}`, headerTextMaxWidth);
+            doc.text(reasonLines, marginX, y);
+            y += reasonLines.length * 12;
           }
 
           const rows = gr.items.map((it) => [it.name, it.sku || '', String(it.qty)]);
 
           autoTable(doc, {
-            startY: gr.reasons.length ? 184 : 176,
+            startY: y + 6,
             margin: { left: marginX, right: marginX },
             head: [['Product', 'SKU', 'Qty Returned']],
             body: rows,
@@ -700,7 +671,7 @@ export default function ReturnedItems() {
               2: { cellWidth: 70 },
             },
             didDrawPage: () => {
-              drawHeader();
+              headerBottomY = drawHeader();
             },
           });
 
@@ -722,14 +693,12 @@ export default function ReturnedItems() {
       } else if (exportScope === 'items') {
         addItemsTable();
       } else {
-        // both: summary first page + per-receipt breakdown pages
         const lastY = addSummaryTable();
         doc.setFontSize(9);
         doc.text('Detailed breakdown per receipt (all items shown):', marginX, Math.min(lastY + 16, pageHeight - 70));
         addPerReceiptBreakdown();
       }
 
-      // Add footers with proper total page count
       const totalPages = doc.getNumberOfPages();
       for (let i = 1; i <= totalPages; i++) {
         doc.setPage(i);
@@ -770,7 +739,6 @@ export default function ReturnedItems() {
         <p className="text-slate-400">View all returned receipts and items</p>
       </div>
 
-      {/* Filter bar: search + status + date range + export */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col sm:flex-row gap-4">
           <div className="relative flex-1">
