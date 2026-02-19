@@ -444,7 +444,7 @@ export default function StockBalanceReport() {
 
             <div class="header">
               <div>
-                <div class="brand">Philuz Appz</div>
+                
                 <div class="company">${escapeHtml(companyName)}</div>
                 <div class="sub">${escapeHtml(reportTitle)} • ${escapeHtml(rangeLine)}</div>
                 ${contactLine ? `<div class="sub">${escapeHtml(contactLine)}</div>` : ``}
