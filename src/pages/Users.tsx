@@ -60,7 +60,8 @@ export default function Users() {
     updateEmployeeRoleBranch,
     setEmployeeFlag,
     profile: me,
-  } = useAuth();
+    activeBranchId, // ✅ IMPORTANT: selected branch from admin selector
+  } = useAuth() as any;
 
   const [users, setUsers] = useState<UserRow[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -101,6 +102,11 @@ export default function Users() {
     return map;
   }, [branches]);
 
+  const activeBranchName = useMemo(() => {
+    if (!activeBranchId) return "All branches";
+    return branchesById.get(String(activeBranchId))?.name ?? "Selected branch";
+  }, [activeBranchId, branchesById]);
+
   // prevent double fetch storms
   const refreshingRef = useRef(false);
   const safeRefreshUsers = async () => {
@@ -137,12 +143,12 @@ export default function Users() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId]);
 
-  // ✅ When showDeleted changes, refetch users
+  // ✅ Refetch when filters change (deleted toggle OR branch selection)
   useEffect(() => {
     if (!companyId) return;
     void fetchUsers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showDeleted, companyId]);
+  }, [showDeleted, companyId, activeBranchId]);
 
   // ✅ When companyId becomes available: repair + load lists
   useEffect(() => {
@@ -179,7 +185,7 @@ export default function Users() {
         });
       }
 
-      // 2) load lists
+      // 2) load branches + users (users will auto-filter by activeBranchId)
       await Promise.all([fetchBranches(), fetchUsers()]);
       setLoading(false);
     })();
@@ -244,6 +250,12 @@ export default function Users() {
         .select(baseSelect)
         .eq("company_id", companyId as any)
         .order("full_name");
+
+      // ✅ Branch filter:
+      // activeBranchId = null => All branches (no extra filter)
+      if (activeBranchId) {
+        q = q.eq("branch_id", String(activeBranchId) as any);
+      }
 
       if (!showDeleted) {
         q = q.filter("deleted_at", "is", null as any);
@@ -521,6 +533,9 @@ export default function Users() {
           <p className="text-slate-400">
             Assign roles & branches (secure via Edge Functions)
           </p>
+          <p className="text-slate-500 text-sm">
+            Viewing: <span className="text-slate-200 font-semibold">{activeBranchName}</span>
+          </p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -540,7 +555,7 @@ export default function Users() {
         <CardHeader>
           <CardTitle className="text-white flex items-center gap-2">
             <UsersIcon className="h-5 w-5" />
-            All Employees
+            Employees
           </CardTitle>
         </CardHeader>
 
