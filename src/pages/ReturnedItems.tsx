@@ -20,7 +20,6 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useToast } from '@/hooks/use-toast';
-import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { FileCheck, Search } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState } from 'react';
@@ -61,29 +60,8 @@ type GroupedReturn = {
 
 type ExportScope = 'summary' | 'items' | 'both';
 
-type CompanyMini = {
-  id: string;
-  name: string;
-  address: string | null;
-  phone: string | null;
-  email: string | null;
-  tax_id: string | null;
-  receipt_footer: string | null;
-  logo_url: string | null;
-};
-
-type BranchMini = {
-  id: string;
-  name: string;
-  address: string | null;
-  phone: string | null;
-  email: string | null;
-};
-
 export default function ReturnedItems() {
   const { toast } = useToast();
-  const { profile, activeBranchId } = useAuth();
-
   const [returns, setReturns] = useState<ReturnWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -99,50 +77,6 @@ export default function ReturnedItems() {
   // ✅ export scope (summary only vs items only vs both)
   const [exportScope, setExportScope] = useState<ExportScope>('both');
 
-  // ✅ company/branch (for branded PDF header)
-  const [company, setCompany] = useState<CompanyMini | null>(null);
-  const [branch, setBranch] = useState<BranchMini | null>(null);
-
-  useEffect(() => {
-    const companyId = (profile as any)?.company_id ?? null;
-    if (!companyId) {
-      setCompany(null);
-      setBranch(null);
-      return;
-    }
-
-    (async () => {
-      try {
-        const { data: c, error: cErr } = await (supabase as any)
-          .from('companies')
-          .select('id,name,address,phone,email,tax_id,receipt_footer,logo_url')
-          .eq('id', companyId)
-          .maybeSingle();
-
-        if (cErr) throw cErr;
-        setCompany((c as CompanyMini) || null);
-
-        const bId = activeBranchId || (profile as any)?.branch_id || null;
-        if (!bId) {
-          setBranch(null);
-          return;
-        }
-
-        const { data: b, error: bErr } = await (supabase as any)
-          .from('branches')
-          .select('id,name,address,phone,email')
-          .eq('id', bId)
-          .maybeSingle();
-
-        if (bErr) throw bErr;
-        setBranch((b as BranchMini) || null);
-      } catch {
-        setCompany(null);
-        setBranch(null);
-      }
-    })();
-  }, [(profile as any)?.company_id, activeBranchId]);
-
   useEffect(() => {
     // initial fetch
     fetchReturns();
@@ -150,9 +84,13 @@ export default function ReturnedItems() {
     // realtime subscription: refresh list when returns change
     const channel = supabase
       .channel('returned-items-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'returns' }, () => {
-        fetchReturns();
-      })
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'returns' },
+        () => {
+          fetchReturns();
+        }
+      )
       .subscribe();
 
     return () => {
@@ -166,13 +104,11 @@ export default function ReturnedItems() {
 
     let query = supabase
       .from('returns')
-      .select(
-        `
+      .select(`
         *,
         sale:sales(receipt_number, customer_name),
         sale_item:sale_items(quantity, product:products(name, sku))
-      `
-      )
+      `)
       .order('created_at', { ascending: false });
 
     if (statusFilter !== 'all') {
@@ -200,8 +136,12 @@ export default function ReturnedItems() {
     }
 
     // Fetch initiator and approver names
-    const initiatorIds = [...new Set((data || []).map((d) => d.initiated_by).filter(Boolean))] as string[];
-    const approverIds = [...new Set((data || []).map((d) => d.approved_by).filter(Boolean))] as string[];
+    const initiatorIds = [
+      ...new Set((data || []).map((d) => d.initiated_by).filter(Boolean)),
+    ] as string[];
+    const approverIds = [
+      ...new Set((data || []).map((d) => d.approved_by).filter(Boolean)),
+    ] as string[];
     const allUserIds = [...new Set([...initiatorIds, ...approverIds])];
 
     let profileMap = new Map<string, string>();
@@ -218,8 +158,12 @@ export default function ReturnedItems() {
 
     const enrichedData = (data || []).map((ret) => ({
       ...ret,
-      initiator: ret.initiated_by ? { full_name: profileMap.get(ret.initiated_by) || 'Unknown' } : undefined,
-      approver: ret.approved_by ? { full_name: profileMap.get(ret.approved_by) || 'Unknown' } : undefined,
+      initiator: ret.initiated_by
+        ? { full_name: profileMap.get(ret.initiated_by) || 'Unknown' }
+        : undefined,
+      approver: ret.approved_by
+        ? { full_name: profileMap.get(ret.approved_by) || 'Unknown' }
+        : undefined,
     }));
 
     setReturns(enrichedData as ReturnWithDetails[]);
@@ -254,7 +198,9 @@ export default function ReturnedItems() {
 
     for (const [sale_id, list] of map.entries()) {
       // sort newest first
-      const sorted = [...list].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      const sorted = [...list].sort((a, b) =>
+        (b.created_at || '').localeCompare(a.created_at || '')
+      );
 
       const receipt_number = sorted[0]?.sale?.receipt_number || sale_id.slice(0, 8);
       const customer_name = sorted[0]?.sale?.customer_name || null;
@@ -265,8 +211,18 @@ export default function ReturnedItems() {
       if (statuses.has('pending')) status = 'pending';
       else if (statuses.size === 1 && statuses.has('approved')) status = 'approved';
       else if (statuses.size === 1 && statuses.has('rejected')) status = 'rejected';
-      else if (statuses.has('approved') && !statuses.has('pending') && !statuses.has('rejected')) status = 'approved';
-      else if (statuses.has('rejected') && !statuses.has('pending') && !statuses.has('approved')) status = 'rejected';
+      else if (
+        statuses.has('approved') &&
+        !statuses.has('pending') &&
+        !statuses.has('rejected')
+      )
+        status = 'approved';
+      else if (
+        statuses.has('rejected') &&
+        !statuses.has('pending') &&
+        !statuses.has('approved')
+      )
+        status = 'rejected';
 
       // items aggregation
       const itemMap = new Map<string, { name: string; sku?: string; qty: number }>();
@@ -288,9 +244,11 @@ export default function ReturnedItems() {
       const items = Array.from(itemMap.values());
 
       // initiator/approver: show latest known (from newest row)
-      const initiator_name = sorted.find((r) => r.initiator?.full_name)?.initiator?.full_name || null;
+      const initiator_name =
+        sorted.find((r) => r.initiator?.full_name)?.initiator?.full_name || null;
 
-      const approver_name = sorted.find((r) => r.approver?.full_name)?.approver?.full_name || null;
+      const approver_name =
+        sorted.find((r) => r.approver?.full_name)?.approver?.full_name || null;
 
       result.push({
         sale_id,
@@ -321,7 +279,12 @@ export default function ReturnedItems() {
       const customer = (gr.customer_name || '').toLowerCase();
       const initiator = (gr.initiator_name || '').toLowerCase();
 
-      return receipt.includes(s) || customer.includes(s) || itemsText.includes(s) || initiator.includes(s);
+      return (
+        receipt.includes(s) ||
+        customer.includes(s) ||
+        itemsText.includes(s) ||
+        initiator.includes(s)
+      );
     });
   }, [groupedReturns, search]);
 
@@ -337,7 +300,12 @@ export default function ReturnedItems() {
       items: gr.items
         .map((it) => `${it.name}${it.sku ? ` (${it.sku})` : ''} x${it.qty}`)
         .join(' | '),
-      reason: gr.reasons.length === 0 ? '' : gr.reasons.length === 1 ? gr.reasons[0] : 'Multiple reasons',
+      reason:
+        gr.reasons.length === 0
+          ? ''
+          : gr.reasons.length === 1
+          ? gr.reasons[0]
+          : 'Multiple reasons',
       initiated_by: gr.initiator_name || '',
       approved_by: gr.approver_name || '',
       created_at: gr.created_at || '',
@@ -399,7 +367,8 @@ export default function ReturnedItems() {
       toast({
         title: 'Export failed',
         description:
-          'Could not export Excel. Make sure "xlsx" is installed (npm i xlsx). ' + (e?.message ? `\n${e.message}` : ''),
+          'Could not export Excel. Make sure "xlsx" is installed (npm i xlsx). ' +
+          (e?.message ? `\n${e.message}` : ''),
         variant: 'destructive',
       });
     }
@@ -414,7 +383,10 @@ export default function ReturnedItems() {
 
     const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const download = (filename: string, headers: string[], rows: Record<string, any>[]) => {
-      const csv = [headers.join(','), ...rows.map((r) => headers.map((h) => esc((r as any)[h])).join(','))].join('\n');
+      const csv = [
+        headers.join(','),
+        ...rows.map((r) => headers.map((h) => esc((r as any)[h])).join(',')),
+      ].join('\n');
 
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -500,7 +472,11 @@ export default function ReturnedItems() {
 
       const reportTitle = `Returned Receipts`;
       const scopeTitle =
-        exportScope === 'both' ? 'Summary + Breakdown' : exportScope === 'summary' ? 'Summary' : 'Items';
+        exportScope === 'both'
+          ? 'Summary + Breakdown'
+          : exportScope === 'summary'
+          ? 'Summary'
+          : 'Items';
 
       const now = new Date().toLocaleString();
 
@@ -513,49 +489,26 @@ export default function ReturnedItems() {
         .filter(Boolean)
         .join('  •  ');
 
-      const companyName = company?.name?.trim() || 'Company';
-      const branchName = branch?.name?.trim() || '';
-
-      const headerAddress = (branch?.address?.trim() || company?.address?.trim() || '').trim();
-      const headerPhone = (branch?.phone?.trim() || company?.phone?.trim() || '').trim();
-      const headerEmail = (branch?.email?.trim() || company?.email?.trim() || '').trim();
-
-      const contactParts = [headerAddress || null, headerPhone ? `Tel: ${headerPhone}` : null, headerEmail || null].filter(
-        Boolean
-      ) as string[];
-
       // ---------
       // Branding helpers (header/footer on every page)
       // ---------
       const drawHeader = () => {
         doc.setFontSize(14);
-        doc.text(companyName, marginX, 34);
+        doc.text('Philuz Appz', marginX, 34);
 
         doc.setFontSize(11);
         doc.text(`${reportTitle} (${scopeTitle})`, marginX, 52);
 
         doc.setFontSize(9);
-        doc.text(contactParts.length ? contactParts.join(' • ') : '—', marginX, 66, {
-          maxWidth: pageWidth - marginX * 2,
-        });
-
-        if (branchName) {
-          doc.text(`Branch: ${branchName}`, marginX, 80, {
-            maxWidth: pageWidth - marginX * 2,
-          });
-        }
+        doc.text(`Generated: ${now}`, marginX, 66, { maxWidth: pageWidth - marginX * 2 });
 
         if (filtersLine) {
-          doc.text(filtersLine, marginX, branchName ? 94 : 80, {
-            maxWidth: pageWidth - marginX * 2,
-          });
+          doc.text(filtersLine, marginX, 80, { maxWidth: pageWidth - marginX * 2 });
         }
-
-        const lineY = filtersLine ? (branchName ? 106 : 92) : branchName ? 92 : 78;
 
         // thin line under header
         doc.setLineWidth(0.6);
-        doc.line(marginX, lineY, pageWidth - marginX, lineY);
+        doc.line(marginX, 92, pageWidth - marginX, 92);
       };
 
       const drawFooter = (pageNumber: number, totalPages: number) => {
@@ -577,7 +530,7 @@ export default function ReturnedItems() {
       drawHeader();
 
       // table should start after header area
-      const startY = 120;
+      const startY = 104;
 
       const addSummaryTable = () => {
         const rows = buildSummaryRows().map((r) => [
@@ -596,7 +549,17 @@ export default function ReturnedItems() {
           startY,
           margin: { left: marginX, right: marginX },
           head: [
-            ['Receipt #', 'Customer', 'Status', 'Items', 'Total Qty', 'Reason', 'Initiated By', 'Approved By', 'Date/Time'],
+            [
+              'Receipt #',
+              'Customer',
+              'Status',
+              'Items',
+              'Total Qty',
+              'Reason',
+              'Initiated By',
+              'Approved By',
+              'Date/Time',
+            ],
           ],
           body: rows,
           styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
@@ -637,7 +600,19 @@ export default function ReturnedItems() {
         autoTable(doc, {
           startY,
           margin: { left: marginX, right: marginX },
-          head: [['Receipt #', 'Customer', 'Status', 'Product', 'SKU', 'Qty', 'Initiated By', 'Approved By', 'Date/Time']],
+          head: [
+            [
+              'Receipt #',
+              'Customer',
+              'Status',
+              'Product',
+              'SKU',
+              'Qty',
+              'Initiated By',
+              'Approved By',
+              'Date/Time',
+            ],
+          ],
           body: rows,
           styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
           headStyles: { fontSize: 8 },
@@ -667,20 +642,22 @@ export default function ReturnedItems() {
           drawHeader();
 
           doc.setFontSize(12);
-          doc.text(`Receipt: ${gr.receipt_number}`, marginX, 132);
+          doc.text(`Receipt: ${gr.receipt_number}`, marginX, 112);
 
           doc.setFontSize(9);
           doc.text(
             `Customer: ${gr.customer_name || 'Walk-in'}   •   Status: ${gr.status}   •   Total Qty: ${gr.total_qty}`,
             marginX,
-            148,
+            128,
             { maxWidth: pageWidth - marginX * 2 }
           );
 
           if (gr.reasons.length) {
             const reasonText =
-              gr.reasons.length === 1 ? gr.reasons[0] : `Multiple: ${Array.from(new Set(gr.reasons)).join(' | ')}`;
-            doc.text(`Reason(s): ${reasonText}`, marginX, 164, {
+              gr.reasons.length === 1
+                ? gr.reasons[0]
+                : `Multiple: ${Array.from(new Set(gr.reasons)).join(' | ')}`;
+            doc.text(`Reason(s): ${reasonText}`, marginX, 144, {
               maxWidth: pageWidth - marginX * 2,
             });
           }
@@ -688,7 +665,7 @@ export default function ReturnedItems() {
           const rows = gr.items.map((it) => [it.name, it.sku || '', String(it.qty)]);
 
           autoTable(doc, {
-            startY: gr.reasons.length ? 184 : 176,
+            startY: gr.reasons.length ? 164 : 156,
             margin: { left: marginX, right: marginX },
             head: [['Product', 'SKU', 'Qty Returned']],
             body: rows,
@@ -707,9 +684,9 @@ export default function ReturnedItems() {
           const footerY = Math.min((doc.lastAutoTable?.finalY || 200) + 18, pageHeight - 70);
           doc.setFontSize(9);
           doc.text(
-            `Initiated By: ${gr.initiator_name || '-'}   •   Approved By: ${gr.approver_name || '-'}   •   Date: ${
-              gr.created_at ? new Date(gr.created_at).toLocaleString() : '-'
-            }`,
+            `Initiated By: ${gr.initiator_name || '-'}   •   Approved By: ${
+              gr.approver_name || '-'
+            }   •   Date: ${gr.created_at ? new Date(gr.created_at).toLocaleString() : '-'}`,
             marginX,
             footerY,
             { maxWidth: pageWidth - marginX * 2 }
@@ -725,7 +702,11 @@ export default function ReturnedItems() {
         // both: summary first page + per-receipt breakdown pages
         const lastY = addSummaryTable();
         doc.setFontSize(9);
-        doc.text('Detailed breakdown per receipt (all items shown):', marginX, Math.min(lastY + 16, pageHeight - 70));
+        doc.text(
+          'Detailed breakdown per receipt (all items shown):',
+          marginX,
+          Math.min(lastY + 16, pageHeight - 70)
+        );
         addPerReceiptBreakdown();
       }
 
@@ -748,7 +729,9 @@ export default function ReturnedItems() {
     } catch (e: any) {
       toast({
         title: 'PDF export failed',
-        description: 'Could not export PDF. Install: npm i jspdf jspdf-autotable' + (e?.message ? `\n${e.message}` : ''),
+        description:
+          'Could not export PDF. Install: npm i jspdf jspdf-autotable' +
+          (e?.message ? `\n${e.message}` : ''),
         variant: 'destructive',
       });
     }
@@ -904,7 +887,9 @@ export default function ReturnedItems() {
                           ))}
                           {gr.items.length > 3 && (
                             <div className="text-xs text-slate-500">
-                              {expanded ? 'Showing all items' : `+${gr.items.length - 3} more item(s) — click to expand`}
+                              {expanded
+                                ? 'Showing all items'
+                                : `+${gr.items.length - 3} more item(s) — click to expand`}
                             </div>
                           )}
                         </div>
@@ -913,7 +898,11 @@ export default function ReturnedItems() {
                       <TableCell className="text-slate-300">{gr.total_qty}</TableCell>
 
                       <TableCell className="text-slate-300">
-                        {gr.reasons.length === 0 ? '-' : gr.reasons.length === 1 ? gr.reasons[0] : 'Multiple reasons'}
+                        {gr.reasons.length === 0
+                          ? '-'
+                          : gr.reasons.length === 1
+                          ? gr.reasons[0]
+                          : 'Multiple reasons'}
                       </TableCell>
 
                       <TableCell className="text-slate-300">{gr.initiator_name || '-'}</TableCell>
@@ -928,7 +917,9 @@ export default function ReturnedItems() {
                       <TableRow className="border-slate-700">
                         <TableCell colSpan={9} className="p-0">
                           <div className="bg-slate-900/40 border-t border-slate-700 p-3">
-                            <p className="text-xs text-slate-400 mb-2">All items on this returned receipt:</p>
+                            <p className="text-xs text-slate-400 mb-2">
+                              All items on this returned receipt:
+                            </p>
 
                             <div className="space-y-2">
                               {gr.items.map((it, idx) => (
@@ -939,7 +930,9 @@ export default function ReturnedItems() {
                                   <div>
                                     <p className="text-sm text-white">
                                       {it.name}
-                                      {it.sku ? <span className="text-xs text-slate-500"> ({it.sku})</span> : null}
+                                      {it.sku ? (
+                                        <span className="text-xs text-slate-500"> ({it.sku})</span>
+                                      ) : null}
                                     </p>
                                     <p className="text-xs text-slate-400">Qty Returned: {it.qty}</p>
                                   </div>
@@ -956,13 +949,17 @@ export default function ReturnedItems() {
                                   {gr.reasons.length === 1 ? (
                                     <p>{gr.reasons[0]}</p>
                                   ) : (
-                                    gr.reasons.map((r, i) => <p key={`${gr.sale_id}-reason-${i}`}>• {r}</p>)
+                                    gr.reasons.map((r, i) => (
+                                      <p key={`${gr.sale_id}-reason-${i}`}>• {r}</p>
+                                    ))
                                   )}
                                 </div>
                               </div>
                             )}
 
-                            <p className="text-xs text-slate-500 mt-3">Click the receipt row again to collapse.</p>
+                            <p className="text-xs text-slate-500 mt-3">
+                              Click the receipt row again to collapse.
+                            </p>
                           </div>
                         </TableCell>
                       </TableRow>
