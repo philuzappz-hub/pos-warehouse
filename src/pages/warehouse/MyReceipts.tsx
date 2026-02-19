@@ -199,6 +199,29 @@ function getInitials(name: string) {
   return (first + last).toUpperCase() || 'CO';
 }
 
+function toTitleCase(input: string) {
+  return (input || "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function staffBranchName(profile: any) {
+  // Try common shapes (depending on how your profile is stored/selected)
+  const n =
+    profile?.branch?.name ||
+    profile?.branch_name ||
+    profile?.branchName ||
+    profile?.branch_title ||
+    profile?.branch_label ||
+    "";
+
+  return String(n || "").trim();
+}
+
 function receiptNumber(prefix: string, createdAt: string, id: string) {
   const d = new Date(createdAt);
   const yyyy = d.getFullYear();
@@ -562,7 +585,12 @@ export default function MyReceipts() {
 
       const doc = new jsPDF({ unit: 'pt', format: 'a4' });
 
-      const watermark = r.status === 'pending' ? 'DRAFT' : 'STAFF COPY';
+     const branchName = toTitleCase(staffBranchName(profile));
+const watermark =
+  r.status === "pending"
+    ? "DRAFT"
+    : `${branchName ? `${branchName} ` : ""}Staff Copy`;
+
       drawWatermark(doc, watermark);
 
       const receiptNo = receiptNumber('SR', r.created_at, r.id);
