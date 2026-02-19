@@ -13,15 +13,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { CartItem, Product } from '@/types/database';
-import {
-  FileText,
-  Minus,
-  Plus,
-  Printer,
-  Search,
-  ShoppingCart,
-  Trash2,
-} from 'lucide-react';
+import { FileText, Minus, Plus, Printer, Search, ShoppingCart, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
@@ -155,7 +147,9 @@ function printHtmlViaIframe(html: string, onAfter?: () => void) {
 }
 
 export default function POS() {
-  const { user, profile } = useAuth();
+  // ✅ IMPORTANT: pull activeBranchId + branchId from useAuth
+  const { user, profile, activeBranchId, branchId } = useAuth();
+
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -173,17 +167,20 @@ export default function POS() {
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [branch, setBranch] = useState<BranchMini | null>(null);
 
+  // ✅ single source of truth for branch filtering
+  const branchFilterId = activeBranchId || branchId;
+
   useEffect(() => {
     fetchProducts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [branchFilterId]);
 
   // ✅ load company + branch details (for printing header)
   useEffect(() => {
     const companyId = (profile as any)?.company_id ?? null;
-    const branchId = (profile as any)?.active_branch_id ?? (profile as any)?.branch_id ?? null;
 
     (async () => {
+      // Company
       try {
         if (companyId) {
           const { data, error } = await (supabase as any)
@@ -200,12 +197,13 @@ export default function POS() {
         setCompany(null);
       }
 
+      // Branch (use branchFilterId, NOT profile.active_branch_id)
       try {
-        if (branchId) {
+        if (branchFilterId) {
           const { data, error } = await (supabase as any)
             .from('branches')
             .select('id,name,address,phone,email')
-            .eq('id', branchId)
+            .eq('id', branchFilterId)
             .maybeSingle();
           if (!error) setBranch((data as BranchMini) || null);
           else setBranch(null);
@@ -216,9 +214,9 @@ export default function POS() {
         setBranch(null);
       }
     })();
-  }, [(profile as any)?.company_id, (profile as any)?.active_branch_id, (profile as any)?.branch_id]);
+  }, [(profile as any)?.company_id, branchFilterId]);
 
-  // realtime products refresh
+  // realtime products refresh (still ok — it re-fetches WITH branch filter)
   useEffect(() => {
     const channel = supabase
       .channel('pos-products-realtime')
@@ -231,13 +229,27 @@ export default function POS() {
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [branchFilterId]);
 
   const fetchProducts = async () => {
+    // ✅ BLOCK if branch not set
+    if (!branchFilterId) {
+      setProducts([]);
+      setLoading(false);
+      toast({
+        title: 'Branch not set',
+        description: 'Your account is missing a branch. Contact admin.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setLoading(true);
+
     const { data, error } = await supabase
       .from('products')
       .select('*, category:categories(*)')
+      .eq('branch_id', branchFilterId) // ✅ FIX: branch filter stops duplicates
       .gt('quantity_in_stock', 0)
       .order('name');
 
@@ -409,8 +421,7 @@ export default function POS() {
   const buildPrintHtml = (data: ReceiptData, saleId: string) => {
     // ✅ Use company + branch for header (NO Philuz at top)
     const companyName = company?.name?.trim() || 'Company';
-    const branchName =
-      branch?.name?.trim() || (profile as any)?.branch_name?.trim() || 'Branch';
+    const branchName = branch?.name?.trim() || 'Branch';
 
     const addr = (branch?.address || company?.address || '').trim();
     const phone = displayGhPhone(branch?.phone || company?.phone || '');
@@ -812,9 +823,7 @@ export default function POS() {
                     <span className="text-primary font-bold">
                       GHS {product.unit_price.toLocaleString()}
                     </span>
-                    <span className="text-xs text-slate-500">
-                      {product.quantity_in_stock} in stock
-                    </span>
+                    <span className="text-xs text-slate-500">{product.quantity_in_stock} in stock</span>
                   </div>
                 </CardContent>
               </Card>
@@ -895,7 +904,12 @@ export default function POS() {
               <span>GHS {total.toLocaleString()}</span>
             </div>
 
-            <Button className="w-full" size="lg" disabled={cart.length === 0} onClick={() => setCheckoutOpen(true)}>
+            <Button
+              className="w-full"
+              size="lg"
+              disabled={cart.length === 0}
+              onClick={() => setCheckoutOpen(true)}
+            >
               Checkout
             </Button>
 
