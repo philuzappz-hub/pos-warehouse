@@ -11,6 +11,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useToast } from '@/hooks/use-toast';
+import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { Download, FileText, RefreshCw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -24,8 +25,26 @@ type Row = {
   revenue: number;
 };
 
+type CompanyMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  tax_id: string | null;
+};
+
+type BranchMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+};
+
 export default function DailySalesReport() {
   const { toast } = useToast();
+  const { profile, activeBranchId } = useAuth() as any; // keep as any in case your hook typing differs
 
   const [loading, setLoading] = useState(true);
 
@@ -41,12 +60,82 @@ export default function DailySalesReport() {
 
   const [rows, setRows] = useState<Row[]>([]);
 
+  // ✅ Branding info
+  const [company, setCompany] = useState<CompanyMini | null>(null);
+  const [branch, setBranch] = useState<BranchMini | null>(null);
+
   // ----------------------------
   // Helpers
   // ----------------------------
   const toStartISO = (d: string) => `${d}T00:00:00.000Z`;
   const toEndISO = (d: string) => `${d}T23:59:59.999Z`;
 
+  const formatContactLine = (c?: {
+    address?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    tax_id?: string | null;
+  }) => {
+    const parts = [
+      c?.address?.trim() ? c.address.trim() : null,
+      c?.phone?.trim() ? `Tel: ${c.phone.trim()}` : null,
+      c?.email?.trim() ? c.email.trim() : null,
+      c?.tax_id?.trim() ? `Tax ID: ${c.tax_id.trim()}` : null,
+    ].filter(Boolean) as string[];
+    return parts.length ? parts.join(' • ') : '—';
+  };
+
+  // ----------------------------
+  // Load company + branch
+  // ----------------------------
+  useEffect(() => {
+    const companyId = (profile as any)?.company_id ?? null;
+    const branchId = activeBranchId ?? (profile as any)?.branch_id ?? null;
+
+    if (!companyId) {
+      setCompany(null);
+      setBranch(null);
+      return;
+    }
+
+    (async () => {
+      try {
+        const { data: cData, error: cErr } = await (supabase as any)
+          .from('companies')
+          .select('id,name,address,phone,email,tax_id')
+          .eq('id', companyId)
+          .maybeSingle();
+
+        if (cErr) throw cErr;
+        setCompany((cData as CompanyMini) || null);
+      } catch {
+        setCompany(null);
+      }
+
+      // Branch is optional — only load if we have an id
+      if (!branchId) {
+        setBranch(null);
+        return;
+      }
+
+      try {
+        const { data: bData, error: bErr } = await (supabase as any)
+          .from('branches')
+          .select('id,name,address,phone,email')
+          .eq('id', branchId)
+          .maybeSingle();
+
+        if (bErr) throw bErr;
+        setBranch((bData as BranchMini) || null);
+      } catch {
+        setBranch(null);
+      }
+    })();
+  }, [(profile as any)?.company_id, (profile as any)?.branch_id, activeBranchId]);
+
+  // ----------------------------
+  // Fetch report data
+  // ----------------------------
   const fetchReport = async () => {
     setLoading(true);
 
@@ -187,6 +276,20 @@ export default function DailySalesReport() {
     const range = `${dateFrom} to ${dateTo}`;
     const now = new Date().toLocaleString();
 
+    const companyName = company?.name?.trim() || 'Company';
+    const branchName = branch?.name?.trim() || '';
+    const branchLine = branchName ? `Branch: ${branchName}` : '';
+
+    // Prefer branch contact if available, else company contact
+    const contactLine =
+      branch && (branch.address || branch.phone || branch.email)
+        ? formatContactLine({
+            address: branch.address,
+            phone: branch.phone,
+            email: branch.email,
+          })
+        : formatContactLine(company);
+
     const tableRows = rows
       .map(
         (r) => `
@@ -210,29 +313,37 @@ export default function DailySalesReport() {
             body { font-family: Arial, sans-serif; padding: 18px; color: var(--text); }
             .paper { max-width: 980px; margin: 0 auto; }
             .printBtn { margin-bottom: 12px; }
+
             .header {
               display:flex; justify-content:space-between; align-items:flex-start; gap:14px;
               border-bottom: 1px solid var(--border); padding-bottom: 10px;
             }
-            .brand { font-weight: 800; font-size: 16px; }
-            .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+            .brand { font-weight: 900; font-size: 16px; }
+            .sub { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
             .meta { text-align:right; font-size: 12px; }
             .meta div { margin-bottom: 3px; }
+
             .totals {
               margin: 14px 0; padding: 10px; border: 1px solid var(--border);
               border-radius: 10px; display:flex; gap:12px; flex-wrap:wrap;
               font-size: 13px;
             }
+
             table { width: 100%; border-collapse: collapse; font-size: 12px; }
             th, td { border: 1px solid var(--border); padding: 8px; vertical-align: top; }
             th { background: #f9fafb; text-align: left; }
+
             .footer {
               margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px;
-              display:flex; gap: 18px;
+              display:flex; gap: 18px; justify-content: space-between; align-items: flex-end;
             }
+            .sigWrap { display:flex; gap: 18px; flex: 1; }
             .sig { flex: 1; }
             .sigLine { border-top: 1px solid #111; margin-top: 32px; padding-top: 6px; font-size: 12px; }
+            .powered { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
             .note { margin-top: 10px; font-size: 12px; color: var(--muted); }
+
             @media print {
               .printBtn { display: none; }
               body { padding: 0; }
@@ -246,8 +357,12 @@ export default function DailySalesReport() {
 
             <div class="header">
               <div>
-                <div class="brand">Philuz Appz</div>
-                <div class="sub">${escapeHtml(title)} • ${escapeHtml(range)}</div>
+                <div class="brand">${escapeHtml(companyName)}</div>
+                <div class="sub">
+                  ${escapeHtml(title)} • ${escapeHtml(range)}<br/>
+                  ${branchLine ? `${escapeHtml(branchLine)}<br/>` : ''}
+                  ${escapeHtml(contactLine)}
+                </div>
               </div>
               <div class="meta">
                 <div><b>Generated:</b> ${escapeHtml(now)}</div>
@@ -276,16 +391,19 @@ export default function DailySalesReport() {
             </table>
 
             <div class="footer">
-              <div class="sig">
-                <div class="sigLine">Prepared By (Name & Signature)</div>
+              <div class="sigWrap">
+                <div class="sig">
+                  <div class="sigLine">Prepared By (Name & Signature)</div>
+                </div>
+                <div class="sig">
+                  <div class="sigLine">Approved By (Name & Signature)</div>
+                </div>
               </div>
-              <div class="sig">
-                <div class="sigLine">Approved By (Name & Signature)</div>
-              </div>
+              <div class="powered">Powered by Philuz Appz</div>
             </div>
 
             <div class="note">
-              Note: “Returned” receipts are excluded from this report (recommended professional behavior).
+              Note: “Returned” receipts are excluded from this report.
             </div>
           </div>
         </body>
@@ -314,6 +432,15 @@ export default function DailySalesReport() {
           <h1 className="text-2xl font-bold text-white">Daily Sales Report</h1>
           <p className="text-slate-400">
             Total quantity sold per item per day (with revenue)
+          </p>
+          <p className="text-slate-500 text-sm">
+            Company: <b className="text-slate-200">{company?.name || '—'}</b>
+            {branch?.name ? (
+              <>
+                {' '}
+                • Branch: <b className="text-slate-200">{branch.name}</b>
+              </>
+            ) : null}
           </p>
         </div>
 
@@ -427,7 +554,7 @@ export default function DailySalesReport() {
           </Table>
 
           <p className="text-xs text-slate-500 mt-3">
-            Note: “Returned” receipts are excluded from this report (recommended professional behavior).
+            Note: “Returned” receipts are excluded from this report.
           </p>
         </CardContent>
       </Card>
