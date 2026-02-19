@@ -337,13 +337,32 @@ function drawCompanyHeader(
   doc.setFontSize(15);
   doc.text(`${companyName} — ${titleRight}`, 80, 44);
 
-  // contacts (wrapped)
-  doc.setFontSize(9.5);
+  // contacts (wrapped) — use real jsPDF line height
+  const contactFontSize = 9.5;
+  doc.setFontSize(contactFontSize);
   doc.setTextColor(71, 85, 105);
-  const line = contactParts.length ? contactParts.join(" • ") : "—";
-  const wrapped = doc.splitTextToSize(line, 380);
+
   const contactY = 60;
+  const line = contactParts.length ? contactParts.join(" • ") : "—";
+
+  // Use more width so it wraps like admin (cleaner)
+  const wrapped = doc.splitTextToSize(line, 470);
+
   doc.text(wrapped, 80, contactY);
+
+  // Real line height from jsPDF
+  const lineHeightFactor =
+    (doc as any).getLineHeightFactor?.() ??
+    (doc as any).internal?.getLineHeightFactor?.() ??
+    1.15;
+
+  const lineHeight = contactFontSize * lineHeightFactor;
+
+  // Divider should be below the LAST wrapped line + padding
+  const dividerY = contactY + wrapped.length * lineHeight + 18;
+
+  doc.setDrawColor(226, 232, 240);
+  doc.line(40, dividerY, 555, dividerY);
 
   // status chip
   const statusText = safeUpper(status);
@@ -357,16 +376,9 @@ function drawCompanyHeader(
   doc.setFontSize(10);
   doc.text(statusText, 500, 45, { align: "center" });
 
-  // divider (dynamic)
-  const lineHeight = 12; // approx for 9.5pt
-  const dividerY = contactY + wrapped.length * lineHeight + 10;
-
-  doc.setDrawColor(226, 232, 240);
-  doc.line(40, dividerY, 555, dividerY);
-
-  // return where content should start
   return dividerY;
 }
+
 
 export default function StockApprovals() {
   const { toast } = useToast();
@@ -847,11 +859,11 @@ export default function StockApprovals() {
     const contactParts = getHeaderContactParts(company, null, "all");
 
     // header now returns bottomY
-    const headerBottomY = drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
+   const headerBottomY = drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
 
     // Receipt no + generated (placed below header safely)
     const receiptNo = receiptNumber("SR", r.created_at, r.id);
-    const metaY = headerBottomY + 18;
+    const metaY = headerBottomY + 28;
 
     doc.setFontSize(9);
     doc.setTextColor(71, 85, 105);
@@ -876,7 +888,7 @@ export default function StockApprovals() {
 
     const leftX = 40;
     const rightX = 320;
-    let y = metaY + 26;
+    let y = metaY + 32;
 
     doc.text(`Branch: ${branchText}`, leftX, y);
     doc.text(`Car Number: ${r.car_number}`, leftX, y + 16);
