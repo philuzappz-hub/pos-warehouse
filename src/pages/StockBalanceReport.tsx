@@ -11,6 +11,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useToast } from '@/hooks/use-toast';
+import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { Download, FileText, RefreshCw, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -31,8 +32,40 @@ type ProductRow = {
   returns_after: number; // qty returned/approved after date (increases stock going forward, so subtracted)
 };
 
+type CompanyMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  tax_id: string | null;
+  receipt_footer: string | null;
+  logo_url: string | null;
+};
+
+type BranchMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+};
+
+function clean(s?: string | null) {
+  const v = (s ?? '').trim();
+  return v ? v : '';
+}
+
+function buildContactLine(parts: Array<string | null | undefined>) {
+  return parts
+    .map((p) => clean(p))
+    .filter(Boolean)
+    .join(' • ');
+}
+
 export default function StockBalanceReport() {
   const { toast } = useToast();
+  const { profile } = useAuth();
 
   const [loading, setLoading] = useState(true);
 
@@ -45,7 +78,59 @@ export default function StockBalanceReport() {
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<ProductRow[]>([]);
 
+  // ✅ Company + Branch (for PDF header)
+  const [company, setCompany] = useState<CompanyMini | null>(null);
+  const [branch, setBranch] = useState<BranchMini | null>(null);
+
   const endOfDayISO = (d: string) => `${d}T23:59:59.999Z`;
+
+  // Load company
+  useEffect(() => {
+    const companyId = (profile as any)?.company_id ?? null;
+    if (!companyId) {
+      setCompany(null);
+      return;
+    }
+
+    (async () => {
+      try {
+        const { data, error } = await (supabase as any)
+          .from('companies')
+          .select('id,name,address,phone,email,tax_id,receipt_footer,logo_url')
+          .eq('id', companyId)
+          .maybeSingle();
+
+        if (error) throw error;
+        setCompany((data as CompanyMini) || null);
+      } catch {
+        setCompany(null);
+      }
+    })();
+  }, [(profile as any)?.company_id]);
+
+  // Load branch (staff branch)
+  useEffect(() => {
+    const branchId = (profile as any)?.branch_id ?? null;
+    if (!branchId) {
+      setBranch(null);
+      return;
+    }
+
+    (async () => {
+      try {
+        const { data, error } = await (supabase as any)
+          .from('branches')
+          .select('id,name,address,phone,email')
+          .eq('id', branchId)
+          .maybeSingle();
+
+        if (error) throw error;
+        setBranch((data as BranchMini) || null);
+      } catch {
+        setBranch(null);
+      }
+    })();
+  }, [(profile as any)?.branch_id]);
 
   const fetchReport = async () => {
     setLoading(true);
@@ -80,7 +165,7 @@ export default function StockBalanceReport() {
       const cutoff = endOfDayISO(asAtDate);
 
       // 2) Sales AFTER date (sale_items joined to sales)
-      // We exclude sales with status='returned' (recommended professional behavior)
+      // We exclude sales with status='returned'
       const { data: soldAfter, error: soldAfterError } = await supabase
         .from('sale_items')
         .select(
@@ -102,7 +187,7 @@ export default function StockBalanceReport() {
         if (row) row.sales_after += qty;
       });
 
-      // 3) Stock receipts AFTER date (stock_receipts increases stock)
+      // 3) Stock receipts AFTER date
       const { data: receiptsAfter, error: receiptsAfterError } = await supabase
         .from('stock_receipts')
         .select('product_id, quantity, created_at')
@@ -124,8 +209,7 @@ export default function StockBalanceReport() {
         });
       }
 
-      // 4) Approved returns AFTER date (returns increase stock when approved)
-      // We use approved_at because that’s when stock gets restored (via trigger).
+      // 4) Approved returns AFTER date
       const { data: returnsAfter, error: returnsAfterError } = await supabase
         .from('returns')
         .select(
@@ -153,8 +237,7 @@ export default function StockBalanceReport() {
 
       // 5) Compute balance_as_at
       const computed = Array.from(base.values()).map((r) => {
-        // balance_now = balance_as_at - sales_after + receipts_after + returns_after
-        // => balance_as_at = balance_now + sales_after - receipts_after - returns_after
+        // balance_as_at = current_stock + sales_after - receipts_after - approved_returns_after
         const balance =
           Number(r.current_stock || 0) +
           Number(r.sales_after || 0) -
@@ -195,10 +278,7 @@ export default function StockBalanceReport() {
   }, [rows, search]);
 
   const totals = useMemo(() => {
-    const totalBalance = filteredRows.reduce(
-      (sum, r) => sum + Number(r.balance_as_at || 0),
-      0
-    );
+    const totalBalance = filteredRows.reduce((sum, r) => sum + Number(r.balance_as_at || 0), 0);
     return { totalBalance };
   }, [filteredRows]);
 
@@ -260,7 +340,7 @@ export default function StockBalanceReport() {
   };
 
   // ----------------------------
-  // ✅ Export PDF (BRANDED)
+  // ✅ Export PDF (BRANDED + Company/Branch header)
   // Print window → Save as PDF
   // ----------------------------
   const exportPDF = () => {
@@ -272,6 +352,26 @@ export default function StockBalanceReport() {
     const reportTitle = 'Stock Balance Report';
     const rangeLine = `As at ${asAtDate} (end of day)`;
     const now = new Date().toLocaleString();
+
+    const companyName = company?.name?.trim() || 'Company';
+    const branchName = branch?.name?.trim() || '';
+    const branchLine = branchName ? `Branch: ${branchName}` : '';
+
+    // ✅ contact line: staff sees branch contact first (fallback to company)
+    const address =
+      clean(branch?.address) || clean(company?.address) || '';
+    const phone =
+      clean(branch?.phone) || clean(company?.phone) || '';
+    const email =
+      clean(branch?.email) || clean(company?.email) || '';
+    const taxId = clean(company?.tax_id) || '';
+
+    const contactLine = buildContactLine([
+      address || null,
+      phone ? `Tel: ${phone}` : null,
+      email || null,
+      taxId ? `Tax ID: ${taxId}` : null,
+    ]);
 
     const tableRows = filteredRows
       .slice()
@@ -307,7 +407,8 @@ export default function StockBalanceReport() {
               border-bottom: 1px solid var(--border); padding-bottom: 10px;
             }
             .brand { font-weight: 900; font-size: 16px; }
-            .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+            .company { font-weight: 800; font-size: 14px; margin-top: 2px; }
+            .sub { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
             .meta { text-align:right; font-size: 12px; }
             .meta div { margin-bottom: 3px; }
 
@@ -344,7 +445,10 @@ export default function StockBalanceReport() {
             <div class="header">
               <div>
                 <div class="brand">Philuz Appz</div>
+                <div class="company">${escapeHtml(companyName)}</div>
                 <div class="sub">${escapeHtml(reportTitle)} • ${escapeHtml(rangeLine)}</div>
+                ${contactLine ? `<div class="sub">${escapeHtml(contactLine)}</div>` : ``}
+                ${branchLine ? `<div class="sub">${escapeHtml(branchLine)}</div>` : ``}
               </div>
               <div class="meta">
                 <div><b>Generated:</b> ${escapeHtml(now)}</div>
