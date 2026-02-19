@@ -227,33 +227,75 @@ function drawWatermark(doc: jsPDF, text: string) {
   doc.restoreGraphicsState?.();
 }
 
-function drawCompanyHeader(doc: jsPDF, company: CompanyMini | null, titleRight: string) {
+/** Clean admin-like contact line for staff PDFs (company-wide) */
+function getHeaderContactParts(company: CompanyMini | null) {
+  const address = company?.address?.trim() || '';
+  const phone = company?.phone?.trim() || '';
+  const email = company?.email?.trim() || '';
+  const tax = company?.tax_id?.trim() || '';
+
+  return [
+    address || null,
+    phone ? `Tel: ${phone}` : null,
+    email || null,
+    tax ? `Tax ID: ${tax}` : null,
+  ].filter(Boolean) as string[];
+}
+
+/**
+ * ✅ Clean header + dynamic height (same idea as admin)
+ * Returns bottomY so the caller can safely place content below header.
+ */
+function drawCompanyHeader(
+  doc: jsPDF,
+  company: CompanyMini | null,
+  titleRight: string,
+  status?: ReceiptStatus
+): { bottomY: number } {
   const companyName = company?.name || 'Company';
   const initials = getInitials(companyName);
 
+  // Left badge
   doc.setFillColor(30, 41, 59);
   doc.circle(54, 44, 16, 'F');
   doc.setTextColor(255, 255, 255);
   doc.setFontSize(12);
   doc.text(initials, 54, 48, { align: 'center' });
 
+  // Title
   doc.setTextColor(15, 23, 42);
   doc.setFontSize(15);
   doc.text(`${companyName} — ${titleRight}`, 80, 44);
 
-  const contactParts = [
-    company?.address?.trim() ? company.address.trim() : null,
-    company?.phone?.trim() ? `Tel: ${company.phone.trim()}` : null,
-    company?.email?.trim() ? company.email.trim() : null,
-    company?.tax_id?.trim() ? `Tax ID: ${company.tax_id.trim()}` : null,
-  ].filter(Boolean) as string[];
+  // Status chip (top-right)
+  if (status) {
+    const [cr, cg, cb] = statusColor(status);
+    doc.setFillColor(cr, cg, cb);
+    doc.roundedRect(420, 30, 130, 22, 10, 10, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(10);
+    doc.text(statusLabel(status), 485, 45, { align: 'center' });
+  }
+
+  // Contact line (wrapped)
+  const contactParts = getHeaderContactParts(company);
+  const line = contactParts.length ? contactParts.join(' • ') : '—';
 
   doc.setFontSize(9.5);
   doc.setTextColor(71, 85, 105);
-  doc.text(contactParts.length ? contactParts.join(' • ') : '—', 80, 60, { maxWidth: 380 });
+
+  // Use splitTextToSize for consistent wrapping (fixes “messy” overlap)
+  const wrapped = doc.splitTextToSize(line, 380);
+  doc.text(wrapped, 80, 60);
+
+  // Dynamic header bottom based on wrapped lines
+  const linesCount = Array.isArray(wrapped) ? wrapped.length : 1;
+  const bottomY = 86 + Math.max(0, linesCount - 1) * 12;
 
   doc.setDrawColor(226, 232, 240);
-  doc.line(40, 74, 555, 74);
+  doc.line(40, bottomY, 555, bottomY);
+
+  return { bottomY };
 }
 
 export default function MyReceipts() {
@@ -525,43 +567,50 @@ export default function MyReceipts() {
 
       const receiptNo = receiptNumber('SR', r.created_at, r.id);
 
-      // header
-      drawCompanyHeader(doc, company, 'Stock Receipt');
+      // ✅ clean + dynamic header (no overlap)
+      const header = drawCompanyHeader(doc, company, 'Stock Receipt', r.status);
 
-      // status pill
-      const [cr, cg, cb] = statusColor(r.status);
-      doc.setFillColor(cr, cg, cb);
-      doc.roundedRect(420, 82, 130, 22, 10, 10, 'F');
-      doc.setTextColor(255, 255, 255);
-      doc.setFontSize(10);
-      doc.text(statusLabel(r.status), 485, 97, { align: 'center' });
+      // Meta line safely below header
+      const metaY = header.bottomY + 18;
 
       doc.setTextColor(71, 85, 105);
       doc.setFontSize(9);
-      doc.text(`Receipt No: ${receiptNo}`, 40, 92);
-      doc.text(`Generated: ${new Date().toLocaleString()}`, 320, 92);
+      doc.text(`Receipt No: ${receiptNo}`, 40, metaY);
+      doc.text(`Generated: ${new Date().toLocaleString()}`, 320, metaY);
 
+      // Details block below meta
       doc.setTextColor(15, 23, 42);
       doc.setFontSize(10);
-      doc.text(`Car Number: ${r.car_number}`, 40, 120);
-      doc.text(`Captured At: ${formatDate(r.created_at)}`, 40, 136);
-      doc.text(`Received By: ${staffName}`, 40, 152);
-      doc.text(`Admin: ${adminName}`, 40, 168);
-      doc.text(`Decision Date: ${decisionDate}`, 40, 184);
 
+      let y = metaY + 28;
+      doc.text(`Car Number: ${r.car_number}`, 40, y);
+      doc.text(`Captured At: ${formatDate(r.created_at)}`, 40, y + 16);
+      doc.text(`Received By: ${staffName}`, 40, y + 32);
+      doc.text(`Admin: ${adminName}`, 40, y + 48);
+      doc.text(`Decision Date: ${decisionDate}`, 40, y + 64);
+
+      y = y + 88;
+
+      // Notes (wrapped)
       const notesText = r.notes?.trim() ? r.notes.trim() : '—';
       doc.setTextColor(71, 85, 105);
-      doc.text(`Notes: ${notesText}`, 40, 205, { maxWidth: 520 });
+      doc.setFontSize(9.5);
+
+      const notesLines = doc.splitTextToSize(`Notes: ${notesText}`, 520);
+      doc.text(notesLines, 40, y);
+      y += (Array.isArray(notesLines) ? notesLines.length : 1) * 12;
+
       doc.setTextColor(15, 23, 42);
 
-      let startY = 230;
       if (r.status === 'rejected') {
         doc.setTextColor(185, 28, 28);
-        doc.text(`Rejection Reason: ${r.rejection_reason || '—'}`, 40, startY, { maxWidth: 520 });
+        const rejLines = doc.splitTextToSize(`Rejection Reason: ${r.rejection_reason || '—'}`, 520);
+        doc.text(rejLines, 40, y + 8);
+        y += 10 + (Array.isArray(rejLines) ? rejLines.length : 1) * 12;
         doc.setTextColor(15, 23, 42);
-        startY += 18;
       }
 
+      // Table
       const items = r.items || [];
       const body = items.map((it, idx) => [
         String(idx + 1),
@@ -574,7 +623,7 @@ export default function MyReceipts() {
       const totalQty = items.reduce((sum, it) => sum + Number(it.quantity || 0), 0);
 
       autoTable(doc, {
-        startY: Math.max(250, startY + 10),
+        startY: Math.max(250, y + 16),
         head: [['#', 'Product', 'SKU', 'Unit', 'Qty']],
         body: body.length ? body : [['—', 'No items found', '—', '—', '—']],
         styles: { fontSize: 9 },
@@ -586,13 +635,15 @@ export default function MyReceipts() {
         margin: { left: 40, right: 40 },
       });
 
-      let y = (doc as any).lastAutoTable?.finalY || 320;
+      let afterTableY = (doc as any).lastAutoTable?.finalY || 320;
 
       doc.setFontSize(10);
       doc.setTextColor(15, 23, 42);
-      doc.text(`Lines: ${items.length}   •   Total Qty: ${Number(totalQty).toLocaleString()}`, 40, y + 20);
-      y += 35;
+      doc.text(`Lines: ${items.length}   •   Total Qty: ${Number(totalQty).toLocaleString()}`, 40, afterTableY + 20);
 
+      let embedY = afterTableY + 35;
+
+      // Waybill embedding (unchanged)
       const rawWaybills = normalizeWaybillUrls(r.waybill_urls);
       if (rawWaybills.length > 0) {
         const signed = await getSignedWaybillUrls(r, 3600);
@@ -602,16 +653,16 @@ export default function MyReceipts() {
         const toEmbed = signedImages.slice(0, MAX_EMBED);
 
         if (toEmbed.length > 0) {
-          if (y > 720) {
+          if (embedY > 720) {
             doc.addPage();
             drawWatermark(doc, watermark);
-            y = 60;
+            embedY = 60;
           }
 
           doc.setFontSize(12);
           doc.setTextColor(15, 23, 42);
-          doc.text(`Waybill Image${toEmbed.length > 1 ? 's' : ''} (Embedded)`, 40, y);
-          y += 12;
+          doc.text(`Waybill Image${toEmbed.length > 1 ? 's' : ''} (Embedded)`, 40, embedY);
+          embedY += 12;
 
           for (let i = 0; i < toEmbed.length; i++) {
             const signedUrl = toEmbed[i];
@@ -627,20 +678,20 @@ export default function MyReceipts() {
             const drawW = Math.floor(w * scale);
             const drawH = Math.floor(h * scale);
 
-            if (y + drawH + 30 > 820) {
+            if (embedY + drawH + 30 > 820) {
               doc.addPage();
               drawWatermark(doc, watermark);
-              y = 60;
+              embedY = 60;
             }
 
             doc.setFontSize(9);
             doc.setTextColor(100, 116, 139);
-            doc.text(`Waybill ${i + 1} of ${toEmbed.length}`, 40, y + 10);
+            doc.text(`Waybill ${i + 1} of ${toEmbed.length}`, 40, embedY + 10);
             doc.setTextColor(15, 23, 42);
 
             try {
-              doc.addImage(img.dataUrl, img.format, 40, y + 16, drawW, drawH, undefined, 'FAST');
-              y = y + 16 + drawH + 18;
+              doc.addImage(img.dataUrl, img.format, 40, embedY + 16, drawW, drawH, undefined, 'FAST');
+              embedY = embedY + 16 + drawH + 18;
             } catch {}
           }
 
@@ -649,14 +700,15 @@ export default function MyReceipts() {
           doc.text(
             `Note: Waybill images are embedded from signed links (private bucket). If you need all images, increase MAX_EMBED.`,
             40,
-            Math.min(820, y + 10),
+            Math.min(820, embedY + 10),
             { maxWidth: 520 }
           );
           doc.setTextColor(15, 23, 42);
-          y += 18;
+          embedY += 18;
         }
       }
 
+      // Footer
       const footer = company?.receipt_footer?.trim() || '';
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
