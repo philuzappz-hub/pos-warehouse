@@ -4,66 +4,16 @@ import { useAuth } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 import { BranchSwitcher } from "./BranchSwitcher";
 
-import {
-  BarChart3,
-  Building2,
-  ClipboardList,
-  Clock,
-  FileCheck,
-  FileText,
-  LayoutDashboard,
-  LogOut,
-  Package,
-  PackagePlus,
-  RotateCcw,
-  ShieldCheck,
-  ShoppingCart,
-  Users,
-  Warehouse as WarehouseIcon,
-} from "lucide-react";
+import { Building2, LogOut } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+
+import { navigation } from "./navConfig";
+import { filterNavigation } from "./navFilter";
 
 // must match BranchSwitcher
 const ADMIN_ACTIVE_BRANCH_NAME_KEY = "admin_active_branch_name_v1";
 
-type NavItem = {
-  name: string;
-  href: string;
-  icon: any;
-  roles: Array<"admin" | "cashier" | "warehouse">;
-  allowAttendanceManager?: boolean;
-  allowReturnsHandler?: boolean;
-};
-
-const navigation: NavItem[] = [
-  { name: "Dashboard", href: "/", icon: LayoutDashboard, roles: ["cashier", "warehouse"] },
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: ["admin"] },
-
-  { name: "Point of Sale", href: "/pos", icon: ShoppingCart, roles: ["cashier"] },
-  { name: "POS Coupons", href: "/pos/coupons", icon: FileText, roles: ["cashier"] },
-
-  { name: "Warehouse", href: "/warehouse", icon: WarehouseIcon, roles: ["warehouse"] },
-  { name: "Receive Stock", href: "/warehouse/receive", icon: PackagePlus, roles: ["warehouse"] },
-  { name: "My Receipts", href: "/warehouse/my-receipts", icon: ClipboardList, roles: ["warehouse"] },
-
-  { name: "Stock Approvals", href: "/stock-approvals", icon: ShieldCheck, roles: ["admin"] },
-  { name: "Attendance", href: "/attendance", icon: Clock, roles: ["admin"], allowAttendanceManager: true },
-  { name: "Inventory", href: "/inventory", icon: Package, roles: ["admin"] },
-
-  { name: "Returns", href: "/returns", icon: RotateCcw, roles: ["cashier"], allowReturnsHandler: true },
-  { name: "Returned Items", href: "/returned-items", icon: FileCheck, roles: ["cashier", "warehouse"] },
-
-    { name: "Employees", href: "/users", icon: Users, roles: ["admin"] },
-
-  // ✅ Expenses (branch-based)
-  // - Cashiers can create + view expenses in their branch
-  // - Admin can view/approve across company
-  // - Returns handler can approve (even if not admin)
-  { name: "Expenses", href: "/expenses", icon: FileText, roles: ["admin", "cashier"], allowReturnsHandler: true },
-
-  { name: "Reports", href: "/reports", icon: BarChart3, roles: ["admin"] },
-];
 function getInitials(name: string) {
   const parts = name
     .trim()
@@ -106,10 +56,8 @@ export default function Sidebar() {
       return;
     }
 
-    // initial read
     setAdminBranchNameCached(readCachedBranchName());
 
-    // listen for changes from other tabs/windows (and sometimes Vercel refreshes)
     const onStorage = (e: StorageEvent) => {
       if (e.key === ADMIN_ACTIVE_BRANCH_NAME_KEY) {
         setAdminBranchNameCached(e.newValue ?? "");
@@ -121,7 +69,6 @@ export default function Sidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
-  // also re-read whenever activeBranchId changes (same tab)
   useEffect(() => {
     if (!isAdmin) return;
     if (!activeBranchId) {
@@ -132,10 +79,10 @@ export default function Sidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, activeBranchId]);
 
-  const filteredNav = navigation.filter((item) => {
-    if (item.allowAttendanceManager && isAttendanceManager) return true;
-    if (item.allowReturnsHandler && isReturnsHandler) return true;
-    return item.roles.some((role) => roles.includes(role as any));
+  const filteredNav = filterNavigation(navigation, {
+    roles: roles as any,
+    isAttendanceManager: !!isAttendanceManager,
+    isReturnsHandler: !!isReturnsHandler,
   });
 
   const isActivePath = (href: string) => {
@@ -143,15 +90,12 @@ export default function Sidebar() {
     return location.pathname === href || location.pathname.startsWith(href + "/");
   };
 
-  // ✅ Title (avoid flashing "Company" — show skeleton until resolved)
   const companyDisplay = (companyName ?? "").trim();
   const showCompanySkeleton = !companyDisplay;
 
-  // ✅ Branch label under title
   const headerBranchLabel = useMemo(() => {
     if (isAdmin) {
       if (!activeBranchId) return "All branches";
-      // if we have an id but no name yet, show Loading (instead of “Selected branch”)
       return adminBranchNameCached?.trim() || "Loading…";
     }
     return branchName ?? "Not assigned";
@@ -161,7 +105,6 @@ export default function Sidebar() {
     ? !!activeBranchId && !adminBranchNameCached?.trim()
     : branchName == null;
 
-  // ✅ Admin “Viewing:” line label
   const adminViewingLabel = useMemo(() => {
     if (!activeBranchId) return "All branches";
     return adminBranchNameCached?.trim() || "Loading…";
@@ -174,7 +117,6 @@ export default function Sidebar() {
       {/* ✅ Brand/Header */}
       <div className="px-5 py-4 border-b border-slate-800">
         <div className="flex items-center gap-3">
-          {/* icon / initials */}
           <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-emerald-500/25 to-cyan-500/10 border border-emerald-500/25 flex items-center justify-center">
             {companyDisplay ? (
               <span className="text-[12px] font-extrabold tracking-wide text-emerald-200">
@@ -186,7 +128,6 @@ export default function Sidebar() {
           </div>
 
           <div className="min-w-0 flex-1">
-            {/* company name */}
             {showCompanySkeleton ? (
               <div className="h-5 w-40 rounded bg-slate-800 animate-pulse" />
             ) : (
@@ -198,7 +139,6 @@ export default function Sidebar() {
               </div>
             )}
 
-            {/* branch line */}
             <div className="mt-1 flex items-center gap-2">
               <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-200 border border-slate-700">
                 Branch
