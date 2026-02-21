@@ -47,6 +47,13 @@ export type Database = {
             referencedRelation: "branches"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "attendance_user_id_profiles_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["user_id"]
+          },
         ]
       }
       audit_logs: {
@@ -159,28 +166,37 @@ export type Database = {
       }
       branches: {
         Row: {
+          address: string | null
           code: string
           company_id: string | null
           created_at: string
+          email: string | null
           id: string
           is_active: boolean
           name: string
+          phone: string | null
         }
         Insert: {
+          address?: string | null
           code: string
           company_id?: string | null
           created_at?: string
+          email?: string | null
           id?: string
           is_active?: boolean
           name: string
+          phone?: string | null
         }
         Update: {
+          address?: string | null
           code?: string
           company_id?: string | null
           created_at?: string
+          email?: string | null
           id?: string
           is_active?: boolean
           name?: string
+          phone?: string | null
         }
         Relationships: [
           {
@@ -249,8 +265,142 @@ export type Database = {
         }
         Relationships: []
       }
+      expense_categories: {
+        Row: {
+          company_id: string | null
+          created_at: string
+          id: string
+          is_active: boolean
+          name: string
+        }
+        Insert: {
+          company_id?: string | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          name: string
+        }
+        Update: {
+          company_id?: string | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expense_categories_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      expenses: {
+        Row: {
+          amount: number
+          approved_at: string | null
+          approved_by: string | null
+          branch_id: string
+          category_id: string | null
+          company_id: string | null
+          created_at: string
+          created_by: string
+          description: string | null
+          expense_date: string
+          id: string
+          paid_at: string | null
+          paid_by: string | null
+          payment_method: Database["public"]["Enums"]["expense_payment_method"]
+          receipt_url: string | null
+          reference_no: string | null
+          rejected_reason: string | null
+          status: Database["public"]["Enums"]["expense_status"]
+          title: string
+          updated_at: string
+          vendor_name: string | null
+        }
+        Insert: {
+          amount?: number
+          approved_at?: string | null
+          approved_by?: string | null
+          branch_id: string
+          category_id?: string | null
+          company_id?: string | null
+          created_at?: string
+          created_by: string
+          description?: string | null
+          expense_date?: string
+          id?: string
+          paid_at?: string | null
+          paid_by?: string | null
+          payment_method?: Database["public"]["Enums"]["expense_payment_method"]
+          receipt_url?: string | null
+          reference_no?: string | null
+          rejected_reason?: string | null
+          status?: Database["public"]["Enums"]["expense_status"]
+          title: string
+          updated_at?: string
+          vendor_name?: string | null
+        }
+        Update: {
+          amount?: number
+          approved_at?: string | null
+          approved_by?: string | null
+          branch_id?: string
+          category_id?: string | null
+          company_id?: string | null
+          created_at?: string
+          created_by?: string
+          description?: string | null
+          expense_date?: string
+          id?: string
+          paid_at?: string | null
+          paid_by?: string | null
+          payment_method?: Database["public"]["Enums"]["expense_payment_method"]
+          receipt_url?: string | null
+          reference_no?: string | null
+          rejected_reason?: string | null
+          status?: Database["public"]["Enums"]["expense_status"]
+          title?: string
+          updated_at?: string
+          vendor_name?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expenses_branch_id_fkey"
+            columns: ["branch_id"]
+            isOneToOne: false
+            referencedRelation: "branches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expenses_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "expense_categories"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expenses_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expenses_created_by_profile_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["user_id"]
+          },
+        ]
+      }
       products: {
         Row: {
+          branch_id: string
           category_id: string | null
           created_at: string
           id: string
@@ -263,6 +413,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          branch_id: string
           category_id?: string | null
           created_at?: string
           id?: string
@@ -275,6 +426,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          branch_id?: string
           category_id?: string | null
           created_at?: string
           id?: string
@@ -287,6 +439,13 @@ export type Database = {
           updated_at?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "products_branch_id_fkey"
+            columns: ["branch_id"]
+            isOneToOne: false
+            referencedRelation: "branches"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "products_category_id_fkey"
             columns: ["category_id"]
@@ -309,9 +468,10 @@ export type Database = {
           id: string
           is_admin: boolean | null
           is_attendance_manager: boolean
+          is_expense_approver: boolean
           is_returns_handler: boolean
           phone: string | null
-          role: string | null
+          role: string
           staff_code: string | null
           updated_at: string
           user_id: string
@@ -328,9 +488,10 @@ export type Database = {
           id?: string
           is_admin?: boolean | null
           is_attendance_manager?: boolean
+          is_expense_approver?: boolean
           is_returns_handler?: boolean
           phone?: string | null
-          role?: string | null
+          role?: string
           staff_code?: string | null
           updated_at?: string
           user_id: string
@@ -347,9 +508,10 @@ export type Database = {
           id?: string
           is_admin?: boolean | null
           is_attendance_manager?: boolean
+          is_expense_approver?: boolean
           is_returns_handler?: boolean
           phone?: string | null
-          role?: string | null
+          role?: string
           staff_code?: string | null
           updated_at?: string
           user_id?: string
@@ -1068,10 +1230,21 @@ export type Database = {
         | { Args: { _user_id: string }; Returns: boolean }
       is_warehouse_staff: { Args: never; Returns: boolean }
       mark_coupon_printed: { Args: { p_coupon_id: string }; Returns: undefined }
+      receive_stock_atomic: {
+        Args: {
+          p_branch_id: string
+          p_notes?: string
+          p_product_id: string
+          p_quantity: number
+          p_supplier_name?: string
+        }
+        Returns: Json
+      }
       reissue_sale_coupon: {
         Args: { p_reason: string; p_sale_id: string }
         Returns: string
       }
+      same_company_as_me: { Args: { target_user: string }; Returns: boolean }
       warehouse_receive_coupon_by_receipt: {
         Args: { p_receipt_number: string }
         Returns: {
@@ -1081,6 +1254,8 @@ export type Database = {
     }
     Enums: {
       app_role: "admin" | "cashier" | "warehouse" | "staff"
+      expense_payment_method: "cash" | "momo" | "bank" | "other"
+      expense_status: "draft" | "submitted" | "approved" | "rejected" | "paid"
       order_status: "pending" | "picking" | "completed" | "returned"
     }
     CompositeTypes: {
@@ -1210,6 +1385,8 @@ export const Constants = {
   public: {
     Enums: {
       app_role: ["admin", "cashier", "warehouse", "staff"],
+      expense_payment_method: ["cash", "momo", "bank", "other"],
+      expense_status: ["draft", "submitted", "approved", "rejected", "paid"],
       order_status: ["pending", "picking", "completed", "returned"],
     },
   },

@@ -54,10 +54,16 @@ const navigation: NavItem[] = [
   { name: "Returns", href: "/returns", icon: RotateCcw, roles: ["cashier"], allowReturnsHandler: true },
   { name: "Returned Items", href: "/returned-items", icon: FileCheck, roles: ["cashier", "warehouse"] },
 
-  { name: "Employees", href: "/users", icon: Users, roles: ["admin"] },
+    { name: "Employees", href: "/users", icon: Users, roles: ["admin"] },
+
+  // ✅ Expenses (branch-based)
+  // - Cashiers can create + view expenses in their branch
+  // - Admin can view/approve across company
+  // - Returns handler can approve (even if not admin)
+  { name: "Expenses", href: "/expenses", icon: FileText, roles: ["admin", "cashier"], allowReturnsHandler: true },
+
   { name: "Reports", href: "/reports", icon: BarChart3, roles: ["admin"] },
 ];
-
 function getInitials(name: string) {
   const parts = name
     .trim()

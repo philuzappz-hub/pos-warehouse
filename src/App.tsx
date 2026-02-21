@@ -19,6 +19,11 @@ import Returns from "./pages/Returns";
 import Users from "./pages/Users";
 import Warehouse from "./pages/Warehouse";
 
+// ✅ Expenses pages (split UI to avoid crowding)
+import ExpenseNew from "./pages/ExpenseNew";
+import Expenses from "./pages/Expenses";
+import PendingExpenses from "./pages/PendingExpenses";
+
 // ✅ Report pages
 import DailySalesReport from "./pages/DailySalesReport";
 import StockBalanceReport from "./pages/StockBalanceReport";
@@ -378,6 +383,39 @@ function AppRoutes() {
           </RoleProtectedRoute>
         }
       />
+
+    {/* Expenses Overview: everyone who can access expenses */}
+<Route
+  path="/expenses"
+  element={
+    <RoleProtectedRoute
+      allowedRoles={["cashier", "admin"]}
+      allowReturnsHandler
+    >
+      <Expenses />
+    </RoleProtectedRoute>
+  }
+/>
+
+{/* New Expense: ONLY Admin + Cashier (NOT returns handler) */}
+<Route
+  path="/expenses/new"
+  element={
+    <RoleProtectedRoute allowedRoles={["cashier", "admin"]}>
+      <ExpenseNew />
+    </RoleProtectedRoute>
+  }
+/>
+
+{/* Pending Queue: ONLY Admin + Returns Handler (cashier shouldn’t approve) */}
+<Route
+  path="/expenses/pending"
+  element={
+    <RoleProtectedRoute allowedRoles={["admin"]} allowReturnsHandler>
+      <PendingExpenses />
+    </RoleProtectedRoute>
+  }
+/>
 
       {/* Daily Sales Report (Cashier only) */}
       <Route
