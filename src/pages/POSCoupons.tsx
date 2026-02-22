@@ -55,6 +55,7 @@ type CompanyMini = {
   phone: string | null;
   email: string | null;
   tax_id: string | null;
+  logo_url: string | null; // ✅ NEW
 };
 
 type BranchMini = {
@@ -64,6 +65,11 @@ type BranchMini = {
   phone: string | null;
   email: string | null;
 };
+
+// ✅ your bucket (same as Sidebar/Admin)
+const COMPANY_LOGO_BUCKET = 'company-logos';
+// ✅ signed url lifetime (seconds)
+const SIGNED_URL_TTL = 60 * 60; // 1 hour
 
 function escapeHtml(str: string) {
   return String(str ?? '')
@@ -79,6 +85,20 @@ function money(n: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+}
+
+function isHttpUrl(v: string) {
+  return /^https?:\/\//i.test(v);
+}
+
+function getInitials(name: string) {
+  const parts = (name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+  if (parts.length === 0) return 'CO';
+  return parts.map((p) => p[0]?.toUpperCase()).join('');
 }
 
 // Display helper: convert "233xxxxxxxxx" => "0xxxxxxxxx"
@@ -131,6 +151,7 @@ async function rpcAny<T = any>(fn: string, args?: Record<string, any>) {
 }
 
 // ✅ Print without popup: hidden iframe printing
+// ✅ UPDATED: wait a bit for images (logo) to load before printing
 function printHtmlViaIframe(html: string, onAfter?: () => void) {
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
@@ -167,30 +188,54 @@ function printHtmlViaIframe(html: string, onAfter?: () => void) {
     }, 500);
   };
 
-  iframe.onload = () => {
-    setTimeout(() => {
-      try {
+  const waitForImagesThenPrint = async () => {
+    try {
+      const images = Array.from((doc.images || []) as any as HTMLImageElement[]);
+      if (images.length === 0) {
         w?.focus();
         w?.print();
-      } finally {
-        cleanup();
+        return;
       }
-    }, 200);
-  };
 
-  setTimeout(() => {
-    try {
+      const start = Date.now();
+      const timeoutMs = 2000;
+
+      // wait until all images are complete or timeout
+      while (Date.now() - start < timeoutMs) {
+        const allDone = images.every((img) => img.complete);
+        if (allDone) break;
+        await new Promise((r) => setTimeout(r, 80));
+      }
+
       w?.focus();
       w?.print();
     } finally {
       cleanup();
     }
+  };
+
+  iframe.onload = () => {
+    setTimeout(() => {
+      void waitForImagesThenPrint();
+    }, 120);
+  };
+
+  // fallback (some browsers don't trigger onload reliably)
+  setTimeout(() => {
+    void waitForImagesThenPrint();
   }, 450);
 }
 
 export default function POSCoupons() {
   const { toast } = useToast();
-  const { user, profile } = useAuth();
+
+  /**
+   * ✅ Branding inputs:
+   * - companyLogoUrl/companyName may come from useAuth (if you already implemented that there)
+   * - we ALSO have a local fallback that reads companies.logo_url and signs it if needed
+   */
+  const { user, profile, companyLogoUrl, companyName, activeBranchId } = useAuth() as any;
+
   const location = useLocation();
 
   const [tab, setTab] = useState<'unprinted' | 'printed'>('unprinted');
@@ -198,9 +243,12 @@ export default function POSCoupons() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
-  // ✅ company + branch for receipt header
+  // ✅ company + branch for receipt header (contact lines)
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [branch, setBranch] = useState<BranchMini | null>(null);
+
+  // ✅ local resolved logo (fallback if useAuth has none)
+  const [resolvedLogoUrl, setResolvedLogoUrl] = useState<string>('');
 
   // status-only dialog for printed coupons
   const [statusOpen, setStatusOpen] = useState(false);
@@ -221,28 +269,37 @@ export default function POSCoupons() {
 
   const didAutoScroll = useRef(false);
 
-  // ✅ load company + branch details
+  // ✅ load company + branch details (+ logo_url)
   useEffect(() => {
     const companyId = (profile as any)?.company_id ?? null;
-    const branchId = (profile as any)?.active_branch_id ?? (profile as any)?.branch_id ?? null;
+
+    // ✅ use activeBranchId from useAuth (admin context), fallback to staff branch_id
+    const branchId = activeBranchId ?? (profile as any)?.branch_id ?? null;
+
+    let cancelled = false;
 
     (async () => {
+      // Company
       try {
         if (companyId) {
           const { data, error } = await (supabase as any)
             .from('companies')
-            .select('id,name,address,phone,email,tax_id')
+            .select('id,name,address,phone,email,tax_id,logo_url')
             .eq('id', companyId)
             .maybeSingle();
-          if (!error) setCompany((data as CompanyMini) || null);
-          else setCompany(null);
-        } else {
+
+          if (!cancelled) {
+            if (!error) setCompany((data as CompanyMini) || null);
+            else setCompany(null);
+          }
+        } else if (!cancelled) {
           setCompany(null);
         }
       } catch {
-        setCompany(null);
+        if (!cancelled) setCompany(null);
       }
 
+      // Branch
       try {
         if (branchId) {
           const { data, error } = await (supabase as any)
@@ -250,16 +307,67 @@ export default function POSCoupons() {
             .select('id,name,address,phone,email')
             .eq('id', branchId)
             .maybeSingle();
-          if (!error) setBranch((data as BranchMini) || null);
-          else setBranch(null);
-        } else {
+
+          if (!cancelled) {
+            if (!error) setBranch((data as BranchMini) || null);
+            else setBranch(null);
+          }
+        } else if (!cancelled) {
           setBranch(null);
         }
       } catch {
-        setBranch(null);
+        if (!cancelled) setBranch(null);
       }
     })();
-  }, [(profile as any)?.company_id, (profile as any)?.active_branch_id, (profile as any)?.branch_id]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [(profile as any)?.company_id, activeBranchId, (profile as any)?.branch_id]);
+
+  // ✅ resolve logo URL (prefer useAuth, fallback to companies.logo_url signed/public)
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      // prefer what useAuth already resolved
+      const fromAuth = String(companyLogoUrl ?? '').trim();
+      if (fromAuth) {
+        setResolvedLogoUrl(fromAuth);
+        return;
+      }
+
+      const raw = String(company?.logo_url ?? '').trim();
+      if (!raw) {
+        setResolvedLogoUrl('');
+        return;
+      }
+
+      try {
+        if (isHttpUrl(raw)) {
+          if (!cancelled) setResolvedLogoUrl(raw);
+          return;
+        }
+
+        const { data: signed, error } = await supabase.storage
+          .from(COMPANY_LOGO_BUCKET)
+          .createSignedUrl(raw, SIGNED_URL_TTL);
+
+        if (error) throw error;
+
+        const url = signed?.signedUrl || '';
+        if (!cancelled) setResolvedLogoUrl(url);
+      } catch {
+        if (!cancelled) setResolvedLogoUrl('');
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [companyLogoUrl, company?.logo_url]);
 
   const fetchCoupons = async () => {
     if (!user) return;
@@ -396,8 +504,7 @@ export default function POSCoupons() {
     if (!targetId && !targetSale) return;
 
     const exists = filtered.some(
-      (r) =>
-        (targetId && r.coupon_id === targetId) || (targetSale && r.sale_id === targetSale)
+      (r) => (targetId && r.coupon_id === targetId) || (targetSale && r.sale_id === targetSale)
     );
     if (!exists) return;
 
@@ -461,20 +568,16 @@ export default function POSCoupons() {
   };
 
   const buildPrintHtml = (data: ReceiptData, saleId: string) => {
-    // ✅ Use company + branch for header (NO Philuz at top)
-    const companyName = company?.name?.trim() || 'Company';
-    const branchName =
-      branch?.name?.trim() || (profile as any)?.branch_name?.trim() || 'Branch';
+    // ✅ Use company + branch for header
+    const displayCompanyName = (String(companyName ?? '').trim() || company?.name || 'Company').trim() || 'Company';
+
+    const branchName = (branch?.name?.trim() || (profile as any)?.branch_name?.trim() || 'Branch').trim() || 'Branch';
 
     const addr = (branch?.address || company?.address || '').trim();
     const phone = displayGhPhone(branch?.phone || company?.phone || '');
     const email = (branch?.email || company?.email || '').trim();
 
-    const contactLine = cleanLine([
-      addr || null,
-      phone ? `Tel: ${phone}` : null,
-      email || null,
-    ]);
+    const contactLine = cleanLine([addr || null, phone ? `Tel: ${phone}` : null, email || null]);
 
     const receiptNumber = escapeHtml(data.receipt_number);
     const now = new Date(data.created_at || Date.now()).toLocaleString();
@@ -501,9 +604,18 @@ export default function POSCoupons() {
       })
       .join('');
 
+    // ✅ Logo or initials (prevents "empty top" when logo missing)
+    const resolved = String(resolvedLogoUrl || '').trim();
+    const initials = getInitials(displayCompanyName);
+
+    const brandHtml = resolved
+      ? `<img class="logo" src="${escapeHtml(resolved)}" alt="Company logo" />`
+      : `<div class="logoFallback" aria-label="Company initials">${escapeHtml(initials)}</div>`;
+
     const headerHtml = `
       <div class="hdr">
-        <div class="co">${escapeHtml(companyName)}</div>
+        ${brandHtml}
+        <div class="co">${escapeHtml(displayCompanyName)}</div>
         <div class="br">${escapeHtml(branchName)}</div>
         ${contactLine ? `<div class="ct">${escapeHtml(contactLine)}</div>` : ''}
       </div>
@@ -674,6 +786,29 @@ export default function POSCoupons() {
             .paper { width: 340px; max-width: 340px; padding: 16px 8px; }
 
             .hdr { text-align: center; }
+
+            /* ✅ prevents overlap: logo gets its own block and spacing */
+            .logo {
+              display:block;
+              margin: 0 auto 8px auto;
+              max-height: 54px;
+              max-width: 170px;
+              object-fit: contain;
+            }
+            .logoFallback {
+              width: 56px;
+              height: 56px;
+              border: 2px solid #111;
+              border-radius: 10px;
+              margin: 0 auto 8px auto;
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              font-weight: 900;
+              font-size: 14px;
+              letter-spacing: .08em;
+            }
+
             .co { font-weight: 900; font-size: 16px; }
             .br { font-weight: 800; font-size: 12px; margin-top: 2px; }
             .ct { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.25; }
@@ -788,16 +923,10 @@ export default function POSCoupons() {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <Button
-          variant={tab === 'unprinted' ? 'default' : 'outline'}
-          onClick={() => setTab('unprinted')}
-        >
+        <Button variant={tab === 'unprinted' ? 'default' : 'outline'} onClick={() => setTab('unprinted')}>
           Unprinted
         </Button>
-        <Button
-          variant={tab === 'printed' ? 'default' : 'outline'}
-          onClick={() => setTab('printed')}
-        >
+        <Button variant={tab === 'printed' ? 'default' : 'outline'} onClick={() => setTab('printed')}>
           Printed
         </Button>
       </div>
@@ -843,31 +972,22 @@ export default function POSCoupons() {
                   id={`coupon-${r.coupon_id}`}
                   className={[
                     'rounded-md border bg-slate-900/40 p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 transition',
-                    isHighlighted
-                      ? 'border-primary ring-2 ring-primary/40 animate-pulse'
-                      : 'border-slate-700',
+                    isHighlighted ? 'border-primary ring-2 ring-primary/40 animate-pulse' : 'border-slate-700',
                   ].join(' ')}
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <div className="text-white font-semibold truncate">{r.receipt_number}</div>
                       {statusBadge(r.status)}
-                      {r.printed_at ? (
-                        <Badge className="bg-slate-700">printed</Badge>
-                      ) : (
-                        <Badge className="bg-red-600">unprinted</Badge>
-                      )}
+                      {r.printed_at ? <Badge className="bg-slate-700">printed</Badge> : <Badge className="bg-red-600">unprinted</Badge>}
                     </div>
 
                     <div className="text-xs text-slate-400 mt-1">
-                      {new Date(r.created_at).toLocaleString()} • {r.customer_name || '—'} •{' '}
-                      {displayGhPhone(r.customer_phone) || '—'}
+                      {new Date(r.created_at).toLocaleString()} • {r.customer_name || '—'} • {displayGhPhone(r.customer_phone) || '—'}
                     </div>
 
                     {isHighlighted && (
-                      <div className="text-xs text-primary mt-1 font-semibold">
-                        This is the coupon that needs attention.
-                      </div>
+                      <div className="text-xs text-primary mt-1 font-semibold">This is the coupon that needs attention.</div>
                     )}
                   </div>
 
@@ -899,24 +1019,20 @@ export default function POSCoupons() {
           {statusRow ? (
             <div className="space-y-2 text-sm">
               <div className="text-slate-300">
-                <span className="text-slate-400">Receipt:</span>{' '}
-                <b className="text-white">{statusRow.receipt_number}</b>
+                <span className="text-slate-400">Receipt:</span> <b className="text-white">{statusRow.receipt_number}</b>
               </div>
               <div className="text-slate-300">
-                <span className="text-slate-400">Customer:</span>{' '}
-                {statusRow.customer_name || '—'} • {displayGhPhone(statusRow.customer_phone) || '—'}
+                <span className="text-slate-400">Customer:</span> {statusRow.customer_name || '—'} •{' '}
+                {displayGhPhone(statusRow.customer_phone) || '—'}
               </div>
               <div className="text-slate-300">
-                <span className="text-slate-400">Warehouse Status:</span>{' '}
-                {statusBadge(statusRow.status)}
+                <span className="text-slate-400">Warehouse Status:</span> {statusBadge(statusRow.status)}
               </div>
               <div className="text-slate-300">
-                <span className="text-slate-400">Printed At:</span>{' '}
-                {statusRow.printed_at ? new Date(statusRow.printed_at).toLocaleString() : '—'}
+                <span className="text-slate-400">Printed At:</span> {statusRow.printed_at ? new Date(statusRow.printed_at).toLocaleString() : '—'}
               </div>
               <div className="text-xs text-slate-500 pt-2">
-                Printed coupons cannot be reprinted here. If customer loses coupon, use the “reissue”
-                flow (we’ll implement next).
+                Printed coupons cannot be reprinted here. If customer loses coupon, use the “reissue” flow (we’ll implement next).
               </div>
             </div>
           ) : (

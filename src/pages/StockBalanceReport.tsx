@@ -32,17 +32,6 @@ type ProductRow = {
   returns_after: number; // qty returned/approved after date (increases stock going forward, so subtracted)
 };
 
-type CompanyMini = {
-  id: string;
-  name: string;
-  address: string | null;
-  phone: string | null;
-  email: string | null;
-  tax_id: string | null;
-  receipt_footer: string | null;
-  logo_url: string | null;
-};
-
 type BranchMini = {
   id: string;
   name: string;
@@ -65,7 +54,9 @@ function buildContactLine(parts: Array<string | null | undefined>) {
 
 export default function StockBalanceReport() {
   const { toast } = useToast();
-  const { profile } = useAuth();
+
+  // ✅ Use centralized company branding from useAuth (same as admin PDFs)
+  const { profile, company, companyLogoUrl } = useAuth() as any;
 
   const [loading, setLoading] = useState(true);
 
@@ -78,35 +69,10 @@ export default function StockBalanceReport() {
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<ProductRow[]>([]);
 
-  // ✅ Company + Branch (for PDF header)
-  const [company, setCompany] = useState<CompanyMini | null>(null);
+  // ✅ Branch (for PDF header) — staff branch
   const [branch, setBranch] = useState<BranchMini | null>(null);
 
   const endOfDayISO = (d: string) => `${d}T23:59:59.999Z`;
-
-  // Load company
-  useEffect(() => {
-    const companyId = (profile as any)?.company_id ?? null;
-    if (!companyId) {
-      setCompany(null);
-      return;
-    }
-
-    (async () => {
-      try {
-        const { data, error } = await (supabase as any)
-          .from('companies')
-          .select('id,name,address,phone,email,tax_id,receipt_footer,logo_url')
-          .eq('id', companyId)
-          .maybeSingle();
-
-        if (error) throw error;
-        setCompany((data as CompanyMini) || null);
-      } catch {
-        setCompany(null);
-      }
-    })();
-  }, [(profile as any)?.company_id]);
 
   // Load branch (staff branch)
   useEffect(() => {
@@ -340,7 +306,7 @@ export default function StockBalanceReport() {
   };
 
   // ----------------------------
-  // ✅ Export PDF (BRANDED + Company/Branch header)
+  // ✅ Export PDF (BRANDED + Company/Branch header + LOGO)
   // Print window → Save as PDF
   // ----------------------------
   const exportPDF = () => {
@@ -353,17 +319,15 @@ export default function StockBalanceReport() {
     const rangeLine = `As at ${asAtDate} (end of day)`;
     const now = new Date().toLocaleString();
 
-    const companyName = company?.name?.trim() || 'Company';
+    const companyName = (company?.name?.trim() || 'Company') as string;
+
     const branchName = branch?.name?.trim() || '';
     const branchLine = branchName ? `Branch: ${branchName}` : '';
 
     // ✅ contact line: staff sees branch contact first (fallback to company)
-    const address =
-      clean(branch?.address) || clean(company?.address) || '';
-    const phone =
-      clean(branch?.phone) || clean(company?.phone) || '';
-    const email =
-      clean(branch?.email) || clean(company?.email) || '';
+    const address = clean(branch?.address) || clean(company?.address) || '';
+    const phone = clean(branch?.phone) || clean(company?.phone) || '';
+    const email = clean(branch?.email) || clean(company?.email) || '';
     const taxId = clean(company?.tax_id) || '';
 
     const contactLine = buildContactLine([
@@ -372,6 +336,8 @@ export default function StockBalanceReport() {
       email || null,
       taxId ? `Tax ID: ${taxId}` : null,
     ]);
+
+    const safeLogoUrl = clean(companyLogoUrl) ? escapeHtml(String(companyLogoUrl)) : '';
 
     const tableRows = filteredRows
       .slice()
@@ -406,8 +372,22 @@ export default function StockBalanceReport() {
               display:flex; justify-content:space-between; align-items:flex-start; gap:14px;
               border-bottom: 1px solid var(--border); padding-bottom: 10px;
             }
-            .brand { font-weight: 900; font-size: 16px; }
-            .company { font-weight: 800; font-size: 14px; margin-top: 2px; }
+
+            .left {
+              display:flex; gap:12px; align-items:flex-start;
+            }
+
+            .logoWrap {
+              width: 56px; height: 56px;
+              border: 1px solid var(--border);
+              border-radius: 12px;
+              display:flex; align-items:center; justify-content:center;
+              overflow:hidden;
+              flex: 0 0 auto;
+            }
+            .logoWrap img { width: 100%; height: 100%; object-fit: contain; }
+
+            .company { font-weight: 900; font-size: 14px; margin-top: 2px; }
             .sub { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
             .meta { text-align:right; font-size: 12px; }
             .meta div { margin-bottom: 3px; }
@@ -443,13 +423,27 @@ export default function StockBalanceReport() {
             <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
 
             <div class="header">
-              <div>
-                
-                <div class="company">${escapeHtml(companyName)}</div>
-                <div class="sub">${escapeHtml(reportTitle)} • ${escapeHtml(rangeLine)}</div>
-                ${contactLine ? `<div class="sub">${escapeHtml(contactLine)}</div>` : ``}
-                ${branchLine ? `<div class="sub">${escapeHtml(branchLine)}</div>` : ``}
+              <div class="left">
+                ${
+                  safeLogoUrl
+                    ? `<div class="logoWrap"><img src="${safeLogoUrl}" alt="Company logo" /></div>`
+                    : `<div class="logoWrap" style="font-weight:900;color:#111; font-size: 12px;">${escapeHtml(
+                        (companyName || 'CO')
+                          .split(/\s+/)
+                          .filter(Boolean)
+                          .slice(0, 2)
+                          .map((w: string) => w[0]?.toUpperCase())
+                          .join('') || 'CO'
+                      )}</div>`
+                }
+                <div>
+                  <div class="company">${escapeHtml(companyName)}</div>
+                  <div class="sub">${escapeHtml(reportTitle)} • ${escapeHtml(rangeLine)}</div>
+                  ${contactLine ? `<div class="sub">${escapeHtml(contactLine)}</div>` : ``}
+                  ${branchLine ? `<div class="sub">${escapeHtml(branchLine)}</div>` : ``}
+                </div>
               </div>
+
               <div class="meta">
                 <div><b>Generated:</b> ${escapeHtml(now)}</div>
                 <div><b>Items (filtered):</b> ${Number(filteredRows.length).toLocaleString()}</div>

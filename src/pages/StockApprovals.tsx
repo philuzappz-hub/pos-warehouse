@@ -40,7 +40,17 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-type ReceiptStatus = "pending" | "approved" | "rejected";
+// ✅ Shared PDF branding (logo-ready)
+import {
+  drawCompanyHeader,
+  drawWatermark,
+  formatDate as fmtDate,
+  getLogoForPdf,
+  receiptNumber,
+  type PdfReceiptStatus,
+} from "@/utils/pdfBranding";
+
+type ReceiptStatus = PdfReceiptStatus;
 
 type ProductMini = {
   id: string;
@@ -96,24 +106,6 @@ type BranchMini = {
   phone: string | null;
   email: string | null;
 };
-
-type CompanyMini = {
-  id: string;
-  name: string;
-  address: string | null;
-  phone: string | null;
-  email: string | null;
-  logo_url: string | null;
-  tax_id: string | null;
-  receipt_footer: string | null;
-};
-
-function fmtDate(d?: string | null) {
-  if (!d) return "-";
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return String(d);
-  return dt.toLocaleString();
-}
 
 function safeUpper(v?: string | null) {
   return (v || "").toString().toUpperCase();
@@ -237,66 +229,26 @@ function fitIntoBox(
   return { w: Math.max(1, imgW * scale), h: Math.max(1, imgH * scale) };
 }
 
-// -----------------------------
-// ✅ PDF helpers
-// -----------------------------
-function getInitials(name: string) {
-  const parts = (name || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts.length === 0) return "CO";
-  const first = parts[0]?.[0] || "";
-  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : parts[0]?.[1] || "";
-  return (first + last).toUpperCase() || "CO";
-}
-
-function receiptNumber(prefix: string, createdAt: string, id: string) {
-  const d = new Date(createdAt);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const short = (id || "").replace(/-/g, "").slice(0, 6).toUpperCase();
-  return `${prefix}-${yyyy}-${mm}${dd}-${short}`;
-}
-
-function drawWatermark(doc: jsPDF, text: string) {
-  const w = doc.internal.pageSize.getWidth();
-  const h = doc.internal.pageSize.getHeight();
-
-  try {
-    (doc as any).setGState?.(new (doc as any).GState({ opacity: 0.08 }));
-  } catch {}
-
-  doc.setTextColor(2, 6, 23);
-  doc.setFontSize(56);
-  doc.text(text, w / 2, h / 2, { align: "center", angle: 35 });
-
-  try {
-    (doc as any).setGState?.(new (doc as any).GState({ opacity: 1 }));
-  } catch {}
-}
-
-// ✅ Contact parts based on branch/all selection
+// ✅ Contact parts based on branch/all selection (admin export)
 function getHeaderContactParts(
-  company: CompanyMini | null,
+  company: any | null,
   branch: BranchMini | null,
   mode: "all" | "branch"
 ) {
   const address =
     mode === "branch"
-      ? (branch?.address?.trim() || company?.address?.trim() || "")
-      : (company?.address?.trim() || "");
+      ? branch?.address?.trim() || company?.address?.trim() || ""
+      : company?.address?.trim() || "";
 
   const phone =
     mode === "branch"
-      ? (branch?.phone?.trim() || company?.phone?.trim() || "")
-      : (company?.phone?.trim() || "");
+      ? branch?.phone?.trim() || company?.phone?.trim() || ""
+      : company?.phone?.trim() || "";
 
   const email =
     mode === "branch"
-      ? (branch?.email?.trim() || company?.email?.trim() || "")
-      : (company?.email?.trim() || "");
+      ? branch?.email?.trim() || company?.email?.trim() || ""
+      : company?.email?.trim() || "";
 
   const parts = [
     address || null,
@@ -308,68 +260,11 @@ function getHeaderContactParts(
   return parts;
 }
 
-/**
- * ✅ FIXED: Dynamic header height
- * Returns bottomY so caller can place the next content safely below header
- */
-function drawCompanyHeader(
-  doc: jsPDF,
-  company: CompanyMini | null,
-  titleRight: string,
-  status: ReceiptStatus,
-  contactParts: string[]
-): { bottomY: number } {
-  const companyName = company?.name || "Company";
-  const initials = getInitials(companyName);
-
-  // Initials badge
-  doc.setFillColor(30, 41, 59);
-  doc.circle(54, 44, 16, "F");
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(12);
-  doc.text(initials, 54, 48, { align: "center" });
-
-  // Company name + title
-  doc.setTextColor(15, 23, 42);
-  doc.setFontSize(15);
-  doc.text(`${companyName} — ${titleRight}`, 80, 44);
-
-  // contacts (wrapped)
-  doc.setFontSize(9.5);
-  doc.setTextColor(71, 85, 105);
-
-  const line = contactParts.length ? contactParts.join(" • ") : "—";
-  const wrapped = doc.splitTextToSize(line, 380);
-
-  const contactY = 60;
-  const lineH = 12; // <- key for consistent spacing
-  doc.text(wrapped, 80, contactY);
-
-  // status chip
-  const statusText = safeUpper(status);
-  let chipColor: [number, number, number] = [245, 158, 11];
-  if (status === "approved") chipColor = [34, 197, 94];
-  if (status === "rejected") chipColor = [239, 68, 68];
-
-  doc.setFillColor(...chipColor);
-  doc.roundedRect(430, 30, 140, 22, 10, 10, "F");
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(10);
-  doc.text(statusText, 500, 45, { align: "center" });
-
-  // divider goes BELOW wrapped lines
-  const lastLineY = contactY + (wrapped.length - 1) * lineH;
-  const dividerY = lastLineY + 14;
-
-  doc.setDrawColor(226, 232, 240);
-  doc.line(40, dividerY, 555, dividerY);
-
-  return { bottomY: dividerY };
-}
-
 export default function StockApprovals() {
   const { toast } = useToast();
-  const { user, isAdmin, activeBranchId, profile } = useAuth();
+
+  // ✅ use global company + logo url (signed/public) from AuthProvider
+  const { user, isAdmin, activeBranchId, profile, company, companyLogoUrl } = useAuth();
 
   const sb = supabase as any;
 
@@ -382,7 +277,6 @@ export default function StockApprovals() {
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
   const [branchMap, setBranchMap] = useState<Map<string, BranchMini>>(new Map());
 
-  const [company, setCompany] = useState<CompanyMini | null>(null);
   const [auditMap, setAuditMap] = useState<Map<string, AuditRow[]>>(new Map());
 
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -459,32 +353,6 @@ export default function StockApprovals() {
     return branchMap.get(branchId)?.name || branchId;
   };
 
-  const fetchCompany = async () => {
-    try {
-      const companyId = (profile as any)?.company_id ?? null;
-      if (!companyId) {
-        setCompany(null);
-        return;
-      }
-
-      const { data, error } = await sb
-        .from("companies")
-        .select("id,name,address,phone,email,logo_url,tax_id,receipt_footer")
-        .eq("id", companyId)
-        .maybeSingle();
-
-      if (error) throw error;
-      setCompany((data as CompanyMini) ?? null);
-    } catch {
-      setCompany(null);
-    }
-  };
-
-  useEffect(() => {
-    fetchCompany();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [(profile as any)?.company_id]);
-
   const fetchBranchNamesForReceipts = async (rows: ReceiptRow[]) => {
     try {
       if (!isAdmin) return;
@@ -558,7 +426,7 @@ export default function StockApprovals() {
       setReceipts(rows);
 
       if (isAdmin) fetchBranchNamesForReceipts(rows).catch(() => {});
-      else setBranchMap(new Map()); // staff doesn't need branchMap for header now
+      else setBranchMap(new Map());
 
       const ids = new Set<string>();
       rows.forEach((r) => {
@@ -849,11 +717,11 @@ export default function StockApprovals() {
     const wm = r.status === "pending" ? "DRAFT" : "STAFF COPY";
     drawWatermark(doc, wm);
 
-    // ✅ STAFF: we will always show clean full company address (wrapped) like admin
-    const contactParts = getHeaderContactParts(company, null, "all");
+    // ✅ logo (public OR signed) from useAuth
+    const logo = await getLogoForPdf(companyLogoUrl);
 
-    // header (dynamic)
-    const header = drawCompanyHeader(doc, company, "Stock Receipt", r.status, contactParts);
+    // ✅ header now supports logo (company-wide)
+    const header = drawCompanyHeader(doc, company as any, "Stock Receipt", r.status, logo);
 
     // meta section (dynamic Y)
     const metaY = header.bottomY + 18;
@@ -1074,7 +942,7 @@ export default function StockApprovals() {
     forceDownloadPdf(doc, filename);
   };
 
-  const exportFilteredPdf = () => {
+  const exportFilteredPdf = async () => {
     if (filtered.length === 0) {
       toast({ title: "Nothing to export", description: "No receipts in this view." });
       return;
@@ -1084,11 +952,11 @@ export default function StockApprovals() {
 
     drawWatermark(doc, "ADMIN COPY");
 
-    // ✅ keep your existing admin logic (branch selected => branch contact, all => company)
-    const selectedBranch = activeBranchId ? branchMap.get(activeBranchId) || null : null;
-    const contactParts = getHeaderContactParts(company, selectedBranch, activeBranchId ? "branch" : "all");
+    // ✅ logo (public OR signed) from useAuth
+    const logo = await getLogoForPdf(companyLogoUrl);
 
-    const header = drawCompanyHeader(doc, company, "Stock Receipts Export", tab, contactParts);
+    // ✅ header now supports logo
+    const header = drawCompanyHeader(doc, company as any, "Stock Receipts Export", tab, logo);
 
     const infoY = header.bottomY + 26;
 

@@ -10,12 +10,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from "@/components/ui/table";
 
 import { Download, FileText, Plus, RefreshCw, Search } from "lucide-react";
@@ -73,6 +73,9 @@ interface CompanyInfo {
   phone: string | null;
   email: string | null;
   tax_id: string | null;
+  // ✅ optional if you later fetch it (we also accept from useAuth)
+  logo_url?: string | null;
+  receipt_footer?: string | null;
 }
 
 interface ExpenseCategory {
@@ -116,6 +119,51 @@ function safeText(v: any) {
   return (v ?? "").toString().trim();
 }
 
+function escapeHtml(str: any) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/** Turn "Wemah Company Limited" -> "WCL" */
+function companyInitials(name: string) {
+  const cleaned = String(name || "")
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .trim();
+  if (!cleaned) return "CO";
+
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  const take = parts.slice(0, 3);
+  const initials = take.map((p) => p[0]?.toUpperCase() ?? "").join("");
+  return initials || "CO";
+}
+
+async function urlToDataUrl(url?: string | null): Promise<string | null> {
+  const u = (url || "").trim();
+  if (!u) return null;
+
+  try {
+    const res = await fetch(u, { mode: "cors" });
+    if (!res.ok) return null;
+
+    const blob = await res.blob();
+
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+
+    return dataUrl;
+  } catch {
+    return null;
+  }
+}
+
 export default function Expenses() {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -129,6 +177,7 @@ export default function Expenses() {
     branchName,
     companyName,
     roles,
+    companyLogoUrl, // ✅ for logo in PDF (from useAuth)
   } = useAuth() as any;
 
   const [loading, setLoading] = useState(false);
@@ -193,7 +242,7 @@ export default function Expenses() {
     try {
       const { data: comp, error: compErr } = await (supabase as any)
         .from("companies")
-        .select("id, name, address, phone, email, tax_id")
+        .select("id, name, address, phone, email, tax_id, logo_url, receipt_footer")
         .eq("id", profile.company_id)
         .maybeSingle();
 
@@ -205,6 +254,8 @@ export default function Expenses() {
           phone: comp.phone ?? null,
           email: comp.email ?? null,
           tax_id: comp.tax_id ?? null,
+          logo_url: comp.logo_url ?? null,
+          receipt_footer: comp.receipt_footer ?? null,
         });
       } else {
         setCompanyMeta((prev) =>
@@ -216,6 +267,8 @@ export default function Expenses() {
             phone: null,
             email: null,
             tax_id: null,
+            logo_url: null,
+            receipt_footer: null,
           } as CompanyInfo)
         );
       }
@@ -488,39 +541,360 @@ export default function Expenses() {
     );
   }, [rows, activeBranchId]);
 
-  // =========================
-  // PDF export (prints this page)
-  // =========================
-  const exportPdf = () => {
-    const style = document.createElement("style");
-    style.setAttribute("data-expenses-print", "true");
-    style.innerHTML = `
-      @media print {
-        body { background: white !important; }
-        .no-print { display: none !important; }
-        .print-area { display: block !important; }
-        .print-area * { color: #0f172a !important; }
-        .print-card { border: 1px solid #e2e8f0 !important; }
-        .print-table th, .print-table td { border-bottom: 1px solid #e2e8f0 !important; padding: 8px 10px !important; font-size: 12px !important; }
-        .print-h1 { font-size: 18px !important; font-weight: 800 !important; margin: 0 0 6px 0 !important; }
-        .print-muted { color: #475569 !important; font-size: 12px !important; }
-        .print-kv { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
-        .print-kv > div { font-size: 12px; }
-        .print-sign { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-top: 18px; }
-        .print-sign .line { height: 1px; background: #cbd5e1; margin-top: 34px; }
-        .print-small { font-size: 11px !important; }
-      }
-    `;
-    document.head.appendChild(style);
+  // Only show branch comparison block when it actually matters
+  const showBranchComparison = !activeBranchId && isAdmin;
 
-    window.print();
-
-    setTimeout(() => {
-      const el = document.querySelector('style[data-expenses-print="true"]');
-      el?.parentNode?.removeChild(el);
-    }, 500);
+  // =========================
+  // PDF export (same format as Attendance PDFs ✅ + logo ✅)
+  // =========================
+  const openPdfWindow = (html: string) => {
+    const win = window.open("", "_blank");
+    if (!win) {
+      toast({
+        title: "Popup blocked",
+        description: "Please allow popups to export PDF.",
+        variant: "destructive",
+      });
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
   };
 
+  const basePdfCss = `
+    <style>
+      :root { --border:#e5e7eb; --muted:#6b7280; --text:#111827; --soft:#f9fafb; }
+      body { font-family: Arial, sans-serif; padding: 18px; color: var(--text); }
+      .paper { max-width: 980px; margin: 0 auto; }
+      .printBtn { margin-bottom: 12px; }
+
+      .header {
+        display:flex; justify-content:space-between; align-items:flex-start; gap:14px;
+        border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;
+      }
+      .brandRow { display:flex; gap:12px; align-items:center; }
+      .logoBadge {
+        width:56px; height:56px; border-radius: 14px;
+        border: 1px solid var(--border); background: var(--soft);
+        display:flex; align-items:center; justify-content:center;
+        font-weight: 900; letter-spacing: .5px;
+        overflow:hidden;
+      }
+      .logoImg { width:100%; height:100%; object-fit:contain; display:block; }
+      .brand { font-weight: 900; font-size: 18px; }
+      .sub { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+      .meta { text-align:right; font-size: 12px; color: var(--muted); }
+      .meta b { color: var(--text); }
+
+      .cards { display:flex; gap:10px; flex-wrap:wrap; margin: 12px 0 10px; }
+      .kpi {
+        flex: 1 1 180px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: white;
+      }
+      .kpi .label { font-size: 11px; color: var(--muted); }
+      .kpi .value { font-size: 20px; font-weight: 900; margin-top: 4px; }
+
+      .box {
+        margin: 10px 0 14px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: white;
+      }
+      .boxTitle { font-weight: 800; margin-bottom: 8px; }
+
+      table { width: 100%; border-collapse: collapse; font-size: 12px; background:white; }
+      th, td { border: 1px solid var(--border); padding: 8px; vertical-align: top; }
+      th { background: #f3f4f6; text-align: left; }
+      .muted { color: var(--muted); }
+      .right { text-align:right; }
+      .nowrap { white-space: nowrap; }
+
+      .sigRow { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 18px; }
+      .sigBox { font-size: 12px; }
+      .sigLine { border-bottom: 1px solid #9ca3af; height: 18px; margin-top: 18px; }
+      .sigLabel { color: var(--muted); margin-top: 6px; }
+
+      @media print {
+        .printBtn { display:none; }
+        body { padding:0; }
+        .paper { max-width:none; }
+      }
+    </style>
+  `;
+
+  const buildPdfHeader = (title: string, subtitle: string, logoDataUrl: string | null) => {
+    const co = safeText(companyMeta?.name) || safeText(companyName) || "Company";
+    const initials = companyInitials(co);
+
+    // match Attendance behavior:
+    // - If branch selected: show ONLY branch name
+    // - If all branches: show "All Branches"
+    const scopeLine = activeBranchId ? headerBranchLabel : "All Branches";
+
+    const logoHtml = logoDataUrl
+      ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
+      : escapeHtml(initials);
+
+    return `
+      <div class="header">
+        <div class="brandRow">
+          <div class="logoBadge">${logoHtml}</div>
+          <div>
+            <div class="brand">${escapeHtml(co)}</div>
+            <div style="font-weight:800; margin-top:2px;">${escapeHtml(title)}</div>
+            <div class="sub">
+              ${escapeHtml(subtitle)}<br/>
+              ${escapeHtml(scopeLine)}
+            </div>
+          </div>
+        </div>
+        <div class="meta">
+          <div><b>Generated:</b> ${escapeHtml(new Date().toLocaleString())}</div>
+        </div>
+      </div>
+    `;
+  };
+
+  /**
+   * Contact rules (same as Attendance idea):
+   * - If ALL branches: show company contact only
+   * - If selected branch: show only that branch contact
+   */
+  const buildContactBlockHtml = () => {
+    const co = safeText(companyMeta?.name) || safeText(companyName) || "Company";
+
+    if (!activeBranchId) {
+      const address = safeText(companyMeta?.address) || "—";
+      const phone = safeText(companyMeta?.phone) || "—";
+      const email = safeText(companyMeta?.email) || "—";
+      const tax = safeText(companyMeta?.tax_id) || "";
+
+      return `
+        <div class="box">
+          <div class="boxTitle">Company Contacts</div>
+          <div class="muted" style="font-size:12px; line-height:1.5;">
+            <div><b>Company:</b> ${escapeHtml(co)}</div>
+            <div><b>Address:</b> ${escapeHtml(address)}</div>
+            <div><b>Phone:</b> ${escapeHtml(phone)}</div>
+            <div><b>Email:</b> ${escapeHtml(email)}</div>
+            ${tax ? `<div><b>Tax ID:</b> ${escapeHtml(tax)}</div>` : ``}
+          </div>
+        </div>
+      `;
+    }
+
+    const bname = safeText(activeBranchMeta?.name) || safeText(headerBranchLabel) || "Selected Branch";
+    const address = safeText(activeBranchMeta?.address) || "—";
+    const phone = safeText(activeBranchMeta?.phone) || "—";
+    const email = safeText(activeBranchMeta?.email) || "—";
+
+    return `
+      <div class="box">
+        <div class="boxTitle">Branch Contacts</div>
+        <div class="muted" style="font-size:12px; line-height:1.5;">
+          <div><b>Branch:</b> ${escapeHtml(bname)}</div>
+          <div><b>Address:</b> ${escapeHtml(address)}</div>
+          <div><b>Phone:</b> ${escapeHtml(phone)}</div>
+          <div><b>Email:</b> ${escapeHtml(email)}</div>
+        </div>
+      </div>
+    `;
+  };
+
+  const exportPdf = async () => {
+    try {
+      const logoDataUrl = await urlToDataUrl(companyLogoUrl || companyMeta?.logo_url || null);
+
+      const title = "Expenses Report";
+      const subtitle = `${startDate} to ${endDate}`;
+
+      const cardsHtml = `
+        <div class="cards">
+          <div class="kpi">
+            <div class="label">Total (Range)</div>
+            <div class="value">GHC ${escapeHtml(money(summary.total))}</div>
+            <div class="muted" style="font-size:12px; margin-top:4px;">${escapeHtml(String(summary.count))} records</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Pending Approval</div>
+            <div class="value">GHC ${escapeHtml(money(summary.pending))}</div>
+            <div class="muted" style="font-size:12px; margin-top:4px;">submitted</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Paid (Approved)</div>
+            <div class="value">GHC ${escapeHtml(money(summary.paid))}</div>
+            <div class="muted" style="font-size:12px; margin-top:4px;">approved</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Rejected</div>
+            <div class="value">GHC ${escapeHtml(money(summary.rejected))}</div>
+            <div class="muted" style="font-size:12px; margin-top:4px;">rejected</div>
+          </div>
+        </div>
+      `;
+
+      const branchComparisonHtml =
+        showBranchComparison && branchComparison.length > 0
+          ? `
+          <div class="box">
+            <div class="boxTitle">Branch Comparison (Current Range)</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Branch</th>
+                  <th class="right">Total</th>
+                  <th class="right">Pending</th>
+                  <th class="right">Paid</th>
+                  <th class="right">Rejected</th>
+                  <th class="right">Records</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${branchComparison
+                  .map(
+                    (b) => `
+                    <tr>
+                      <td>${escapeHtml(b.branch_name)}</td>
+                      <td class="right">GHC ${escapeHtml(money(b.total))}</td>
+                      <td class="right">GHC ${escapeHtml(money(b.submitted))}</td>
+                      <td class="right">GHC ${escapeHtml(money(b.approved))}</td>
+                      <td class="right">GHC ${escapeHtml(money(b.rejected))}</td>
+                      <td class="right">${escapeHtml(String(b.count))}</td>
+                    </tr>
+                  `
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        `
+          : ``;
+
+      const rowsHtml =
+        rows.length > 0
+          ? rows
+              .map((e) => {
+                const createdBy =
+                  (e.creator?.full_name ?? "—") +
+                  (e.creator?.staff_code ? ` (${e.creator.staff_code})` : "");
+                const vendorRef =
+                  e.vendor_name || e.reference_no
+                    ? `<div class="muted" style="font-size:11px; margin-top:3px;">
+                        ${e.vendor_name ? `Vendor: ${escapeHtml(e.vendor_name)}` : ""}
+                        ${e.vendor_name && e.reference_no ? " • " : ""}
+                        ${e.reference_no ? `Ref: ${escapeHtml(e.reference_no)}` : ""}
+                      </div>`
+                    : "";
+                return `
+                  <tr>
+                    <td>
+                      ${escapeHtml(e.title)}
+                      ${vendorRef}
+                      ${
+                        e.status === "rejected" && e.rejected_reason
+                          ? `<div class="muted" style="font-size:11px; margin-top:3px; color:#b91c1c;">
+                              Reason: ${escapeHtml(e.rejected_reason)}
+                            </div>`
+                          : ""
+                      }
+                    </td>
+                    ${!activeBranchId ? `<td>${escapeHtml(e.branch_name ?? "—")}</td>` : ""}
+                    <td>${escapeHtml(e.category_name ?? "—")}</td>
+                    <td class="right">GHC ${escapeHtml(money(Number(e.amount || 0)))}</td>
+                    <td class="nowrap">${escapeHtml(e.expense_date)}</td>
+                    <td>${escapeHtml(createdBy)}</td>
+                    <td class="nowrap">${escapeHtml(statusLabel(e.status))}</td>
+                  </tr>
+                `;
+              })
+              .join("")
+          : `<tr><td colspan="${!activeBranchId ? 7 : 6}" class="muted">No records for selected range.</td></tr>`;
+
+      const footerText =
+        safeText(companyMeta?.receipt_footer) || "Powered by Philuz Appz";
+
+      const html = `
+        <html>
+          <head>
+            <title>${escapeHtml(title)} (${escapeHtml(subtitle)})</title>
+            ${basePdfCss}
+          </head>
+          <body>
+            <div class="paper">
+              <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
+
+              ${buildPdfHeader(title, subtitle, logoDataUrl)}
+
+              ${buildContactBlockHtml()}
+
+              ${cardsHtml}
+
+              ${branchComparisonHtml}
+
+              <div class="box">
+                <div class="boxTitle">Expenses (All Statuses)</div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Title</th>
+                      ${!activeBranchId ? `<th>Branch</th>` : ""}
+                      <th>Category</th>
+                      <th class="right">Amount</th>
+                      <th>Date</th>
+                      <th>Created By</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rowsHtml}
+                  </tbody>
+                </table>
+
+                <div class="sigRow">
+                  <div class="sigBox">
+                    <b>Prepared by:</b>
+                    <div class="sigLine"></div>
+                    <div class="sigLabel">Signature</div>
+                  </div>
+                  <div class="sigBox">
+                    <b>Checked by:</b>
+                    <div class="sigLine"></div>
+                    <div class="sigLabel">Signature</div>
+                  </div>
+                  <div class="sigBox">
+                    <b>Approved by:</b>
+                    <div class="sigLine"></div>
+                    <div class="sigLabel">Signature</div>
+                  </div>
+                </div>
+
+                <div class="muted" style="margin-top:12px; font-size:11px;">
+                  ${escapeHtml(footerText)}
+                </div>
+              </div>
+            </div>
+          </body>
+        </html>
+      `;
+
+      openPdfWindow(html);
+    } catch (e: any) {
+      toast({
+        title: "Export failed",
+        description: e?.message || "Could not export",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // =========================
+  // Report labels (UI + fallback, kept)
+  // =========================
   const reportTitle = activeBranchId
     ? `Expenses Report — ${headerBranchLabel}`
     : `Expenses Report — All branches`;
@@ -536,9 +910,6 @@ export default function Expenses() {
   const reportEmailLine = activeBranchId
     ? safeText(activeBranchMeta?.email) || "—"
     : safeText(companyMeta?.email) || "—";
-
-  // Only show branch comparison block when it actually matters
-  const showBranchComparison = !activeBranchId && isAdmin;
 
   return (
     <div className="space-y-6">
@@ -901,162 +1272,14 @@ export default function Expenses() {
         </Card>
       </div>
 
-      {/* PRINT AREA (includes full range rows; OK for PDF export) */}
+      {/* PRINT AREA (kept but no longer used for export; safe to keep) */}
       <div className="print-area hidden" ref={printRef as any}>
         <div className="p-6">
-          <div className="print-card p-4 rounded">
-            <div className="print-h1">{reportTitle}</div>
-            <div className="print-muted">
-              Company:{" "}
-              <span className="print-small">
-                {safeText(companyMeta?.name) || safeText(companyName) || "Company"}
-              </span>
-            </div>
-            <div className="print-muted">
-              Branch Scope:{" "}
-              <span className="print-small">
-                {activeBranchId ? headerBranchLabel : "All branches (combined)"}
-              </span>
-            </div>
-
-            <div className="print-kv">
-              <div>
-                <div className="print-muted">Address</div>
-                <div className="print-small">{reportAddressLine}</div>
-              </div>
-              <div>
-                <div className="print-muted">Phone</div>
-                <div className="print-small">{reportPhoneLine}</div>
-              </div>
-              <div>
-                <div className="print-muted">Email</div>
-                <div className="print-small">{reportEmailLine}</div>
-              </div>
-              <div>
-                <div className="print-muted">Date Range</div>
-                <div className="print-small">
-                  {startDate} → {endDate}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 print-kv">
-              <div>
-                <div className="print-muted">Total (Range)</div>
-                <div className="print-small">GHC {money(summary.total)}</div>
-              </div>
-              <div>
-                <div className="print-muted">Pending Approval</div>
-                <div className="print-small">GHC {money(summary.pending)}</div>
-              </div>
-              <div>
-                <div className="print-muted">Paid (Approved)</div>
-                <div className="print-small">GHC {money(summary.paid)}</div>
-              </div>
-              <div>
-                <div className="print-muted">Rejected</div>
-                <div className="print-small">GHC {money(summary.rejected)}</div>
-              </div>
-            </div>
-          </div>
-
-          {showBranchComparison && branchComparison.length > 0 && (
-            <div className="print-card p-4 rounded mt-4">
-              <div className="print-h1">Branch Comparison</div>
-              <table className="w-full print-table mt-2">
-                <thead>
-                  <tr>
-                    <th align="left">Branch</th>
-                    <th align="right">Total</th>
-                    <th align="right">Pending</th>
-                    <th align="right">Paid</th>
-                    <th align="right">Rejected</th>
-                    <th align="right">Records</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {branchComparison.map((b) => (
-                    <tr key={b.branch_id}>
-                      <td>{b.branch_name}</td>
-                      <td align="right">GHC {money(b.total)}</td>
-                      <td align="right">GHC {money(b.submitted)}</td>
-                      <td align="right">GHC {money(b.approved)}</td>
-                      <td align="right">GHC {money(b.rejected)}</td>
-                      <td align="right">{b.count}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          <div className="print-card p-4 rounded mt-4">
-            <div className="print-h1">Expenses (All Statuses)</div>
-            <table className="w-full print-table mt-2">
-              <thead>
-                <tr>
-                  <th align="left">Title</th>
-                  {!activeBranchId ? <th align="left">Branch</th> : null}
-                  <th align="left">Category</th>
-                  <th align="right">Amount</th>
-                  <th align="left">Date</th>
-                  <th align="left">Created By</th>
-                  <th align="left">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((e) => (
-                  <tr key={e.id}>
-                    <td>
-                      {e.title}
-                      {e.vendor_name || e.reference_no ? (
-                        <div className="print-muted print-small">
-                          {e.vendor_name ? `Vendor: ${e.vendor_name}` : ""}
-                          {e.vendor_name && e.reference_no ? " • " : ""}
-                          {e.reference_no ? `Ref: ${e.reference_no}` : ""}
-                        </div>
-                      ) : null}
-                    </td>
-                    {!activeBranchId ? <td>{e.branch_name ?? "—"}</td> : null}
-                    <td>{e.category_name ?? "—"}</td>
-                    <td align="right">GHC {money(Number(e.amount || 0))}</td>
-                    <td>{e.expense_date}</td>
-                    <td>
-                      {(e.creator?.full_name ?? "—") +
-                        (e.creator?.staff_code ? ` (${e.creator.staff_code})` : "")}
-                    </td>
-                    <td>{statusLabel(e.status)}</td>
-                  </tr>
-                ))}
-
-                {rows.length === 0 ? (
-                  <tr>
-                    <td colSpan={!activeBranchId ? 7 : 6} className="print-muted">
-                      No records for selected range.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-
-            <div className="print-sign">
-              <div>
-                <div className="line" />
-                <div className="print-muted">Prepared By</div>
-              </div>
-              <div>
-                <div className="line" />
-                <div className="print-muted">Checked By</div>
-              </div>
-              <div>
-                <div className="line" />
-                <div className="print-muted">Approved By</div>
-              </div>
-            </div>
-
-            <div className="print-muted mt-3 print-small">
-              Printed on: {new Date().toLocaleString()}
-            </div>
+          <div className="rounded border p-4">
+            <div className="font-bold">{reportTitle}</div>
+            <div className="text-sm text-slate-600">Address: {reportAddressLine}</div>
+            <div className="text-sm text-slate-600">Phone: {reportPhoneLine}</div>
+            <div className="text-sm text-slate-600">Email: {reportEmailLine}</div>
           </div>
         </div>
       </div>

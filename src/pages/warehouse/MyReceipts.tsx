@@ -1,13 +1,13 @@
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
-import { useToast } from '@/hooks/use-toast';
-import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/integrations/supabase/client';
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import {
   ChevronLeft,
   ChevronRight,
@@ -16,14 +16,26 @@ import {
   Image as ImageIcon,
   RefreshCw,
   Search,
-} from 'lucide-react';
-import { Fragment, useEffect, useMemo, useState } from 'react';
+} from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 // PDF
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
-type ReceiptStatus = 'pending' | 'approved' | 'rejected';
+// ✅ Shared PDF branding
+import {
+  drawCompanyHeader,
+  drawWatermark,
+  formatDate,
+  getLogoForPdf,
+  receiptNumber,
+  staffBranchName,
+  toTitleCase,
+  type PdfReceiptStatus,
+} from "@/utils/pdfBranding";
+
+type ReceiptStatus = PdfReceiptStatus;
 
 type ProductMini = {
   id: string;
@@ -58,41 +70,17 @@ type ReceiptRow = {
   items?: ReceiptItem[];
 };
 
-type CompanyMini = {
-  id: string;
-  name: string;
-  address: string | null;
-  phone: string | null;
-  email: string | null;
-  tax_id: string | null;
-  receipt_footer: string | null;
-  logo_url: string | null;
-};
-
-function formatDate(d?: string | null) {
-  if (!d) return '-';
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return String(d);
-  return dt.toLocaleString();
-}
-
-function statusLabel(s: ReceiptStatus) {
-  if (s === 'pending') return 'PENDING';
-  if (s === 'approved') return 'APPROVED';
-  return 'REJECTED';
-}
-
-function statusColor(s: ReceiptStatus): [number, number, number] {
-  if (s === 'pending') return [245, 158, 11];
-  if (s === 'approved') return [34, 197, 94];
-  return [239, 68, 68];
+function statusLabelUi(s: ReceiptStatus) {
+  if (s === "pending") return "Pending";
+  if (s === "approved") return "Approved";
+  return "Rejected";
 }
 
 function forceDownloadPdf(doc: jsPDF, filename: string) {
-  const blob = doc.output('blob');
+  const blob = doc.output("blob");
   const url = URL.createObjectURL(blob);
 
-  const a = document.createElement('a');
+  const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
@@ -106,29 +94,29 @@ function normalizeWaybillUrls(v: any): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
 
-  if (typeof v === 'object') {
+  if (typeof v === "object") {
     if (Array.isArray(v.urls)) return v.urls.filter(Boolean).map(String);
     if (Array.isArray(v.files)) return v.files.filter(Boolean).map(String);
   }
 
-  if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
   return [];
 }
 
 function extractWaybillPath(urlOrPath: string): string {
-  const s = (urlOrPath || '').trim();
-  if (!s) return '';
+  const s = (urlOrPath || "").trim();
+  if (!s) return "";
 
-  if (!s.startsWith('http')) return s;
+  if (!s.startsWith("http")) return s;
 
-  const idx = s.toLowerCase().indexOf('/waybills/');
-  if (idx >= 0) return s.slice(idx + '/waybills/'.length);
+  const idx = s.toLowerCase().indexOf("/waybills/");
+  if (idx >= 0) return s.slice(idx + "/waybills/".length);
 
-  const idx2 = s.toLowerCase().indexOf('/object/');
+  const idx2 = s.toLowerCase().indexOf("/object/");
   if (idx2 >= 0) {
-    const after = s.slice(idx2 + '/object/'.length);
+    const after = s.slice(idx2 + "/object/".length);
     const lower = after.toLowerCase();
-    const b = 'waybills/';
+    const b = "waybills/";
     const bIdx = lower.indexOf(b);
     if (bIdx >= 0) return after.slice(bIdx + b.length);
   }
@@ -137,20 +125,20 @@ function extractWaybillPath(urlOrPath: string): string {
 }
 
 function isLikelyImageUrl(u: string) {
-  const s = (u || '').toLowerCase();
-  return s.includes('.png') || s.includes('.jpg') || s.includes('.jpeg') || s.includes('.webp') || s.includes('image');
+  const s = (u || "").toLowerCase();
+  return s.includes(".png") || s.includes(".jpg") || s.includes(".jpeg") || s.includes(".webp") || s.includes("image");
 }
 
 async function imageUrlToDataUrl(
   url: string
-): Promise<{ dataUrl: string; format: 'PNG' | 'JPEG'; width: number; height: number } | null> {
+): Promise<{ dataUrl: string; format: "PNG" | "JPEG"; width: number; height: number } | null> {
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
 
     const blob = await res.blob();
-    const mime = (blob.type || '').toLowerCase();
-    const format: 'PNG' | 'JPEG' = mime.includes('png') || url.toLowerCase().includes('.png') ? 'PNG' : 'JPEG';
+    const mime = (blob.type || "").toLowerCase();
+    const format: "PNG" | "JPEG" = mime.includes("png") || url.toLowerCase().includes(".png") ? "PNG" : "JPEG";
 
     let width = 0;
     let height = 0;
@@ -170,7 +158,7 @@ async function imageUrlToDataUrl(
             height = img.naturalHeight || 0;
             resolve();
           };
-          img.onerror = () => reject(new Error('img load failed'));
+          img.onerror = () => reject(new Error("img load failed"));
           img.src = objUrl;
         });
       } finally {
@@ -191,172 +179,19 @@ async function imageUrlToDataUrl(
   }
 }
 
-function getInitials(name: string) {
-  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return 'CO';
-  const first = parts[0]?.[0] || '';
-  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : parts[0]?.[1] || '';
-  return (first + last).toUpperCase() || 'CO';
-}
-
-function toTitleCase(input: string) {
-  return (input || "")
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-function staffBranchName(profile: any) {
-  // Try common shapes (depending on how your profile is stored/selected)
-  const n =
-    profile?.branch?.name ||
-    profile?.branch_name ||
-    profile?.branchName ||
-    profile?.branch_title ||
-    profile?.branch_label ||
-    "";
-
-  return String(n || "").trim();
-}
-
-function receiptNumber(prefix: string, createdAt: string, id: string) {
-  const d = new Date(createdAt);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const short = (id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
-  return `${prefix}-${yyyy}-${mm}${dd}-${short}`;
-}
-
-function drawWatermark(doc: jsPDF, text: string) {
-  const w = doc.internal.pageSize.getWidth();
-  const h = doc.internal.pageSize.getHeight();
-
-  doc.saveGraphicsState?.();
-  try {
-    (doc as any).setGState?.(new (doc as any).GState({ opacity: 0.08 }));
-  } catch {}
-
-  doc.setTextColor(2, 6, 23);
-  doc.setFontSize(56);
-  doc.text(text, w / 2, h / 2, { align: 'center', angle: 35 });
-
-  try {
-    (doc as any).setGState?.(new (doc as any).GState({ opacity: 1 }));
-  } catch {}
-  doc.restoreGraphicsState?.();
-}
-
-/** Clean admin-like contact line for staff PDFs (company-wide) */
-function getHeaderContactParts(company: CompanyMini | null) {
-  const address = company?.address?.trim() || '';
-  const phone = company?.phone?.trim() || '';
-  const email = company?.email?.trim() || '';
-  const tax = company?.tax_id?.trim() || '';
-
-  return [
-    address || null,
-    phone ? `Tel: ${phone}` : null,
-    email || null,
-    tax ? `Tax ID: ${tax}` : null,
-  ].filter(Boolean) as string[];
-}
-
-/**
- * ✅ Clean header + dynamic height (same idea as admin)
- * Returns bottomY so the caller can safely place content below header.
- */
-function drawCompanyHeader(
-  doc: jsPDF,
-  company: CompanyMini | null,
-  titleRight: string,
-  status?: ReceiptStatus
-): { bottomY: number } {
-  const companyName = company?.name || 'Company';
-  const initials = getInitials(companyName);
-
-  // Left badge
-  doc.setFillColor(30, 41, 59);
-  doc.circle(54, 44, 16, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(12);
-  doc.text(initials, 54, 48, { align: 'center' });
-
-  // Title
-  doc.setTextColor(15, 23, 42);
-  doc.setFontSize(15);
-  doc.text(`${companyName} — ${titleRight}`, 80, 44);
-
-  // Status chip (top-right)
-  if (status) {
-    const [cr, cg, cb] = statusColor(status);
-    doc.setFillColor(cr, cg, cb);
-    doc.roundedRect(420, 30, 130, 22, 10, 10, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(10);
-    doc.text(statusLabel(status), 485, 45, { align: 'center' });
-  }
-
-  // Contact line (wrapped)
-  const contactParts = getHeaderContactParts(company);
-  const line = contactParts.length ? contactParts.join(' • ') : '—';
-
-  doc.setFontSize(9.5);
-  doc.setTextColor(71, 85, 105);
-
-  // Use splitTextToSize for consistent wrapping (fixes “messy” overlap)
-  const wrapped = doc.splitTextToSize(line, 380);
-  doc.text(wrapped, 80, 60);
-
-  // Dynamic header bottom based on wrapped lines
-  const linesCount = Array.isArray(wrapped) ? wrapped.length : 1;
-  const bottomY = 86 + Math.max(0, linesCount - 1) * 12;
-
-  doc.setDrawColor(226, 232, 240);
-  doc.line(40, bottomY, 555, bottomY);
-
-  return { bottomY };
-}
-
 export default function MyReceipts() {
   const { toast } = useToast();
-  const { user, profile } = useAuth();
+
+  // ✅ Global company + global signed/public logo url
+  const { user, profile, company, companyLogoUrl } = useAuth();
 
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<ReceiptStatus>('pending');
-  const [search, setSearch] = useState('');
+  const [tab, setTab] = useState<ReceiptStatus>("pending");
+  const [search, setSearch] = useState("");
   const [rows, setRows] = useState<ReceiptRow[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const [userNameMap, setUserNameMap] = useState<Map<string, string>>(new Map());
-
-  const [company, setCompany] = useState<CompanyMini | null>(null);
-
-  useEffect(() => {
-    const companyId = (profile as any)?.company_id ?? null;
-    if (!companyId) {
-      setCompany(null);
-      return;
-    }
-
-    (async () => {
-      try {
-        const { data, error } = await (supabase as any)
-          .from('companies')
-          .select('id,name,address,phone,email,tax_id,receipt_footer,logo_url')
-          .eq('id', companyId)
-          .maybeSingle();
-
-        if (error) throw error;
-        setCompany((data as CompanyMini) || null);
-      } catch {
-        setCompany(null);
-      }
-    })();
-  }, [(profile as any)?.company_id]);
 
   const [exportingIds, setExportingIds] = useState<Set<string>>(new Set());
   const setExporting = (id: string, on: boolean) => {
@@ -389,9 +224,9 @@ export default function MyReceipts() {
     const signed: string[] = [];
     for (const u of raw) {
       const path = extractWaybillPath(u);
-      if (!path || path.startsWith('http')) continue;
+      if (!path || path.startsWith("http")) continue;
 
-      const { data, error } = await supabase.storage.from('waybills').createSignedUrl(path, expiresSec);
+      const { data, error } = await supabase.storage.from("waybills").createSignedUrl(path, expiresSec);
       if (!error && data?.signedUrl) signed.push(data.signedUrl);
     }
     return signed;
@@ -400,7 +235,7 @@ export default function MyReceipts() {
   const openWaybillsForReceipt = async (r: ReceiptRow, startIndex = 0) => {
     const raw = normalizeWaybillUrls(r.waybill_urls);
     if (raw.length === 0) {
-      toast({ title: 'No waybill', description: 'This receipt has no waybill attached.' });
+      toast({ title: "No waybill", description: "This receipt has no waybill attached." });
       return;
     }
 
@@ -415,10 +250,10 @@ export default function MyReceipts() {
 
       if (signed.length === 0) {
         toast({
-          title: 'Waybill not accessible',
+          title: "Waybill not accessible",
           description:
             'Could not create signed URLs. Make sure waybill_urls stores storage paths like "receiptId/userId/file.jpg".',
-          variant: 'destructive',
+          variant: "destructive",
         });
         closeWaybill();
         return;
@@ -428,9 +263,9 @@ export default function MyReceipts() {
       setWaybillActiveIndex((prev) => Math.max(0, Math.min(prev, signed.length - 1)));
     } catch (e: any) {
       toast({
-        title: 'Waybill error',
-        description: e?.message || 'Could not open waybill preview',
-        variant: 'destructive',
+        title: "Waybill error",
+        description: e?.message || "Could not open waybill preview",
+        variant: "destructive",
       });
       closeWaybill();
     } finally {
@@ -444,7 +279,7 @@ export default function MyReceipts() {
     setLoading(true);
     try {
       const { data, error } = await supabase
-        .from('warehouse_receipts' as any)
+        .from("warehouse_receipts" as any)
         .select(
           `
             id,
@@ -468,9 +303,9 @@ export default function MyReceipts() {
             )
           `
         )
-        .eq('created_by', user.id)
-        .eq('status', tab)
-        .order('created_at', { ascending: false });
+        .eq("created_by", user.id)
+        .eq("status", tab)
+        .order("created_at", { ascending: false });
 
       if (error) throw error;
 
@@ -485,9 +320,9 @@ export default function MyReceipts() {
 
       if (ids.size > 0) {
         const { data: profilesData, error: pErr } = await supabase
-          .from('profiles')
-          .select('user_id, full_name')
-          .in('user_id', Array.from(ids));
+          .from("profiles")
+          .select("user_id, full_name")
+          .in("user_id", Array.from(ids));
 
         if (!pErr && profilesData) {
           const m = new Map<string, string>();
@@ -497,9 +332,9 @@ export default function MyReceipts() {
       } else setUserNameMap(new Map());
     } catch (e: any) {
       toast({
-        title: 'Error',
-        description: e?.message || 'Failed to load your receipts',
-        variant: 'destructive',
+        title: "Error",
+        description: e?.message || "Failed to load your receipts",
+        variant: "destructive",
       });
       setRows([]);
       setUserNameMap(new Map());
@@ -515,13 +350,13 @@ export default function MyReceipts() {
 
   useEffect(() => {
     const ch1 = supabase
-      .channel('warehouse-my-receipts-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_receipts' }, () => fetchMine())
+      .channel("warehouse-my-receipts-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "warehouse_receipts" }, () => fetchMine())
       .subscribe();
 
     const ch2 = supabase
-      .channel('warehouse-my-receipt-items-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_receipt_items' }, () => fetchMine())
+      .channel("warehouse-my-receipt-items-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "warehouse_receipt_items" }, () => fetchMine())
       .subscribe();
 
     return () => {
@@ -545,11 +380,11 @@ export default function MyReceipts() {
     if (!s) return rows;
 
     return rows.filter((r) => {
-      const car = (r.car_number || '').toLowerCase();
-      const notes = (r.notes || '').toLowerCase();
+      const car = (r.car_number || "").toLowerCase();
+      const notes = (r.notes || "").toLowerCase();
       const itemsText = (r.items || [])
-        .map((it) => it.product?.name || '')
-        .join(' ')
+        .map((it) => it.product?.name || "")
+        .join(" ")
         .toLowerCase();
 
       return car.includes(s) || notes.includes(s) || itemsText.includes(s);
@@ -557,9 +392,9 @@ export default function MyReceipts() {
   }, [rows, search]);
 
   const statusBadge = (s: ReceiptStatus) => {
-    if (s === 'pending') return <Badge className="bg-yellow-500">Pending</Badge>;
-    if (s === 'approved') return <Badge className="bg-green-500">Approved</Badge>;
-    return <Badge className="bg-red-500">Rejected</Badge>;
+    if (s === "pending") return <Badge className="bg-yellow-500">{statusLabelUi(s)}</Badge>;
+    if (s === "approved") return <Badge className="bg-green-500">{statusLabelUi(s)}</Badge>;
+    return <Badge className="bg-red-500">{statusLabelUi(s)}</Badge>;
   };
 
   const exportReceiptPdf = async (r: ReceiptRow) => {
@@ -568,37 +403,39 @@ export default function MyReceipts() {
     setExporting(r.id, true);
 
     try {
-      const staffName = profile?.full_name || 'Unknown';
+      const staffName = profile?.full_name || "Unknown";
       const adminName =
-        r.status === 'approved'
-          ? userNameMap.get(String(r.approved_by || '')) || 'Admin'
-          : r.status === 'rejected'
-            ? userNameMap.get(String(r.rejected_by || '')) || 'Admin'
-            : '—';
+        r.status === "approved"
+          ? userNameMap.get(String(r.approved_by || "")) || "Admin"
+          : r.status === "rejected"
+            ? userNameMap.get(String(r.rejected_by || "")) || "Admin"
+            : "—";
 
       const decisionDate =
-        r.status === 'approved'
+        r.status === "approved"
           ? formatDate(r.approved_at || null)
-          : r.status === 'rejected'
+          : r.status === "rejected"
             ? formatDate(r.rejected_at || null)
-            : '—';
+            : "—";
 
-      const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
 
-     const branchName = toTitleCase(staffBranchName(profile));
-const watermark =
-  r.status === "pending"
-    ? "DRAFT"
-    : `${branchName ? `${branchName} ` : ""}Staff Copy`;
+      const branchName = toTitleCase(staffBranchName(profile));
+      const watermark =
+        r.status === "pending"
+          ? "DRAFT"
+          : `${branchName ? `${branchName} ` : ""}Staff Copy`;
 
       drawWatermark(doc, watermark);
 
-      const receiptNo = receiptNumber('SR', r.created_at, r.id);
+      const receiptNo = receiptNumber("SR", r.created_at, r.id);
 
-      // ✅ clean + dynamic header (no overlap)
-      const header = drawCompanyHeader(doc, company, 'Stock Receipt', r.status);
+      // ✅ global logo url (public OR signed) -> convert for jsPDF
+      const logo = await getLogoForPdf(companyLogoUrl);
 
-      // Meta line safely below header
+      // ✅ shared header
+      const header = drawCompanyHeader(doc, company as any, "Stock Receipt", r.status, logo);
+
       const metaY = header.bottomY + 18;
 
       doc.setTextColor(71, 85, 105);
@@ -606,7 +443,6 @@ const watermark =
       doc.text(`Receipt No: ${receiptNo}`, 40, metaY);
       doc.text(`Generated: ${new Date().toLocaleString()}`, 320, metaY);
 
-      // Details block below meta
       doc.setTextColor(15, 23, 42);
       doc.setFontSize(10);
 
@@ -620,7 +456,7 @@ const watermark =
       y = y + 88;
 
       // Notes (wrapped)
-      const notesText = r.notes?.trim() ? r.notes.trim() : '—';
+      const notesText = r.notes?.trim() ? r.notes.trim() : "—";
       doc.setTextColor(71, 85, 105);
       doc.setFontSize(9.5);
 
@@ -630,21 +466,20 @@ const watermark =
 
       doc.setTextColor(15, 23, 42);
 
-      if (r.status === 'rejected') {
+      if (r.status === "rejected") {
         doc.setTextColor(185, 28, 28);
-        const rejLines = doc.splitTextToSize(`Rejection Reason: ${r.rejection_reason || '—'}`, 520);
+        const rejLines = doc.splitTextToSize(`Rejection Reason: ${r.rejection_reason || "—"}`, 520);
         doc.text(rejLines, 40, y + 8);
         y += 10 + (Array.isArray(rejLines) ? rejLines.length : 1) * 12;
         doc.setTextColor(15, 23, 42);
       }
 
-      // Table
       const items = r.items || [];
       const body = items.map((it, idx) => [
         String(idx + 1),
-        it.product?.name || 'Unknown',
-        it.product?.sku || '-',
-        it.product?.unit || '-',
+        it.product?.name || "Unknown",
+        it.product?.sku || "-",
+        it.product?.unit || "-",
         Number(it.quantity || 0).toLocaleString(),
       ]);
 
@@ -652,13 +487,13 @@ const watermark =
 
       autoTable(doc, {
         startY: Math.max(250, y + 16),
-        head: [['#', 'Product', 'SKU', 'Unit', 'Qty']],
-        body: body.length ? body : [['—', 'No items found', '—', '—', '—']],
+        head: [["#", "Product", "SKU", "Unit", "Qty"]],
+        body: body.length ? body : [["—", "No items found", "—", "—", "—"]],
         styles: { fontSize: 9 },
         headStyles: { fillColor: [30, 41, 59] as any },
         columnStyles: {
           0: { cellWidth: 30 },
-          4: { halign: 'right', cellWidth: 70 },
+          4: { halign: "right", cellWidth: 70 },
         },
         margin: { left: 40, right: 40 },
       });
@@ -667,7 +502,11 @@ const watermark =
 
       doc.setFontSize(10);
       doc.setTextColor(15, 23, 42);
-      doc.text(`Lines: ${items.length}   •   Total Qty: ${Number(totalQty).toLocaleString()}`, 40, afterTableY + 20);
+      doc.text(
+        `Lines: ${items.length}   •   Total Qty: ${Number(totalQty).toLocaleString()}`,
+        40,
+        afterTableY + 20
+      );
 
       let embedY = afterTableY + 35;
 
@@ -689,7 +528,7 @@ const watermark =
 
           doc.setFontSize(12);
           doc.setTextColor(15, 23, 42);
-          doc.text(`Waybill Image${toEmbed.length > 1 ? 's' : ''} (Embedded)`, 40, embedY);
+          doc.text(`Waybill Image${toEmbed.length > 1 ? "s" : ""} (Embedded)`, 40, embedY);
           embedY += 12;
 
           for (let i = 0; i < toEmbed.length; i++) {
@@ -718,7 +557,7 @@ const watermark =
             doc.setTextColor(15, 23, 42);
 
             try {
-              doc.addImage(img.dataUrl, img.format, 40, embedY + 16, drawW, drawH, undefined, 'FAST');
+              doc.addImage(img.dataUrl, img.format, 40, embedY + 16, drawW, drawH, undefined, "FAST");
               embedY = embedY + 16 + drawH + 18;
             } catch {}
           }
@@ -737,19 +576,19 @@ const watermark =
       }
 
       // Footer
-      const footer = company?.receipt_footer?.trim() || '';
+      const footer = company?.receipt_footer?.trim() || "";
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
-      doc.text(footer ? footer : '—', 40, 808, { maxWidth: 380 });
-      doc.text(`Powered by Philuz Appz`, 555, 820, { align: 'right' });
+      doc.text(footer ? footer : "—", 40, 808, { maxWidth: 380 });
+      doc.text(`Powered by Philuz Appz`, 555, 820, { align: "right" });
 
       const filename = `MyStockReceipt-${r.car_number}-${r.status}-${new Date().toISOString().slice(0, 10)}.pdf`;
       forceDownloadPdf(doc, filename);
     } catch (e: any) {
       toast({
-        title: 'PDF export failed',
-        description: e?.message || 'Could not generate PDF',
-        variant: 'destructive',
+        title: "PDF export failed",
+        description: e?.message || "Could not generate PDF",
+        variant: "destructive",
       });
     } finally {
       setExporting(r.id, false);
@@ -762,7 +601,7 @@ const watermark =
         <div>
           <h1 className="text-2xl font-bold text-white">My Stock Receipts</h1>
           <p className="text-slate-400">
-            Company: <b>{company?.name || '—'}</b> • Receipts you captured (pending / approved / rejected)
+            Company: <b>{company?.name || "—"}</b> • Receipts you captured (pending / approved / rejected)
           </p>
         </div>
 
@@ -773,13 +612,13 @@ const watermark =
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <Button variant={tab === 'pending' ? 'default' : 'outline'} onClick={() => setTab('pending')}>
+        <Button variant={tab === "pending" ? "default" : "outline"} onClick={() => setTab("pending")}>
           Pending
         </Button>
-        <Button variant={tab === 'approved' ? 'default' : 'outline'} onClick={() => setTab('approved')}>
+        <Button variant={tab === "approved" ? "default" : "outline"} onClick={() => setTab("approved")}>
           Approved
         </Button>
-        <Button variant={tab === 'rejected' ? 'default' : 'outline'} onClick={() => setTab('rejected')}>
+        <Button variant={tab === "rejected" ? "default" : "outline"} onClick={() => setTab("rejected")}>
           Rejected
         </Button>
       </div>
@@ -853,12 +692,7 @@ const watermark =
 
                         <TableCell className="text-slate-300">
                           {waybillCount > 0 ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => openWaybillsForReceipt(r, 0)}
-                              title="View waybill images"
-                            >
+                            <Button size="sm" variant="outline" onClick={() => openWaybillsForReceipt(r, 0)} title="View waybill images">
                               <ImageIcon className="h-4 w-4 mr-2" />
                               View ({waybillCount})
                             </Button>
@@ -872,12 +706,12 @@ const watermark =
                         <TableCell className="text-right">
                           <div className="inline-flex gap-2">
                             <Button variant="outline" size="sm" onClick={() => toggleExpand(r.id)}>
-                              {isOpen ? 'Hide' : 'View'}
+                              {isOpen ? "Hide" : "View"}
                             </Button>
 
                             <Button size="sm" onClick={() => exportReceiptPdf(r)} title="Download PDF" disabled={exporting}>
                               <Download className="h-4 w-4 mr-2" />
-                              {exporting ? 'Exporting...' : 'Export'}
+                              {exporting ? "Exporting..." : "Export"}
                             </Button>
                           </div>
                         </TableCell>
@@ -888,7 +722,7 @@ const watermark =
                           <TableCell colSpan={7} className="p-0">
                             <div className="bg-slate-900/40 border-t border-slate-700 p-4 space-y-3">
                               <div className="text-sm text-slate-300">
-                                <span className="text-slate-400">Notes:</span> {r.notes || '—'}
+                                <span className="text-slate-400">Notes:</span> {r.notes || "—"}
                               </div>
 
                               <div className="rounded-md border border-slate-700 bg-slate-950/30 p-3">
@@ -908,11 +742,10 @@ const watermark =
                                 )}
                               </div>
 
-                              {(r.status === 'rejected' && (r.rejection_reason || r.rejected_at)) && (
+                              {r.status === "rejected" && (r.rejection_reason || r.rejected_at) && (
                                 <div className="text-sm text-slate-300">
-                                  <span className="text-slate-400">Rejection:</span>{' '}
-                                  {r.rejection_reason || '—'}{' '}
-                                  <span className="text-slate-500">({r.rejected_at ? formatDate(r.rejected_at) : ''})</span>
+                                  <span className="text-slate-400">Rejection:</span> {r.rejection_reason || "—"}{" "}
+                                  <span className="text-slate-500">({r.rejected_at ? formatDate(r.rejected_at) : ""})</span>
                                 </div>
                               )}
 
@@ -929,12 +762,10 @@ const watermark =
                                   <TableBody>
                                     {(r.items || []).map((it) => (
                                       <TableRow key={it.id} className="border-slate-700">
-                                        <TableCell className="text-white font-medium">{it.product?.name || 'Unknown'}</TableCell>
-                                        <TableCell className="text-slate-300">{it.product?.sku || '-'}</TableCell>
-                                        <TableCell className="text-slate-300">{it.product?.unit || '-'}</TableCell>
-                                        <TableCell className="text-slate-300 text-right">
-                                          {Number(it.quantity || 0).toLocaleString()}
-                                        </TableCell>
+                                        <TableCell className="text-white font-medium">{it.product?.name || "Unknown"}</TableCell>
+                                        <TableCell className="text-slate-300">{it.product?.sku || "-"}</TableCell>
+                                        <TableCell className="text-slate-300">{it.product?.unit || "-"}</TableCell>
+                                        <TableCell className="text-slate-300 text-right">{Number(it.quantity || 0).toLocaleString()}</TableCell>
                                       </TableRow>
                                     ))}
 
@@ -949,9 +780,7 @@ const watermark =
                                 </Table>
                               </div>
 
-                              <div className="text-xs text-slate-500">
-                                Pending = waiting for admin approval. Approved = stock updated.
-                              </div>
+                              <div className="text-xs text-slate-500">Pending = waiting for admin approval. Approved = stock updated.</div>
                             </div>
                           </TableCell>
                         </TableRow>
@@ -969,7 +798,7 @@ const watermark =
         <DialogContent className="bg-slate-900 border-slate-700 max-w-3xl">
           <DialogHeader>
             <DialogTitle className="text-white">
-              Waybill Preview {waybillActiveReceiptId ? `• ${waybillActiveReceiptId}` : ''}
+              Waybill Preview {waybillActiveReceiptId ? `• ${waybillActiveReceiptId}` : ""}
             </DialogTitle>
           </DialogHeader>
 
@@ -979,7 +808,7 @@ const watermark =
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs text-slate-400">
-                  Image <b className="text-white">{waybillActiveIndex + 1}</b> of{' '}
+                  Image <b className="text-white">{waybillActiveIndex + 1}</b> of{" "}
                   <b className="text-white">{waybillActiveUrls.length}</b>
                 </div>
 

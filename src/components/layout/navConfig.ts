@@ -1,17 +1,18 @@
 import {
-    BarChart3,
-    ClipboardList,
-    Clock,
-    FileCheck,
-    FileText,
-    LayoutDashboard,
-    Package,
-    PackagePlus,
-    RotateCcw,
-    ShieldCheck,
-    ShoppingCart,
-    Users,
-    Warehouse as WarehouseIcon,
+  BarChart3,
+  ClipboardList,
+  Clock,
+  FileCheck,
+  FileText,
+  LayoutDashboard,
+  Package,
+  PackagePlus,
+  RotateCcw,
+  Settings,
+  ShieldCheck,
+  ShoppingCart,
+  Users,
+  Warehouse as WarehouseIcon,
 } from "lucide-react";
 
 export type AppRole = "admin" | "cashier" | "warehouse" | "staff";
@@ -49,4 +50,5 @@ export const navigation: NavItem[] = [
   { name: "Expenses", href: "/expenses", icon: FileText, roles: ["admin", "cashier"], allowReturnsHandler: true },
 
   { name: "Reports", href: "/reports", icon: BarChart3, roles: ["admin"] },
+  { name: "Settings", href: "/settings", icon: Settings, roles: ["admin"] },
 ];

@@ -41,6 +41,7 @@ type CompanyMini = {
   phone: string | null;
   email: string | null;
   tax_id: string | null;
+  logo_url?: string | null; // ✅ added (for printing logo)
 };
 
 type BranchMini = {
@@ -51,6 +52,9 @@ type BranchMini = {
   email: string | null;
 };
 
+const COMPANY_LOGO_BUCKET = 'company-logos';
+const SIGNED_URL_TTL = 60 * 60; // 1 hour
+
 function escapeHtml(str: string) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -58,6 +62,21 @@ function escapeHtml(str: string) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function isHttpUrl(v: string) {
+  return /^https?:\/\//i.test(v || '');
+}
+
+function getInitials(name: string) {
+  const parts = (name || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  if (parts.length === 0) return 'CO';
+  return parts.map((p) => p[0]?.toUpperCase()).join('');
 }
 
 function money(n: number) {
@@ -88,6 +107,7 @@ async function rpcAny<T = any>(fn: string, args?: Record<string, any>) {
 }
 
 // ✅ Print without popup: hidden iframe printing (avoids blank new window)
+// ✅ Updated: waits briefly for logo/images to load before printing
 function printHtmlViaIframe(html: string, onAfter?: () => void) {
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
@@ -124,25 +144,54 @@ function printHtmlViaIframe(html: string, onAfter?: () => void) {
     }, 500);
   };
 
-  iframe.onload = () => {
-    setTimeout(() => {
-      try {
-        w?.focus();
-        w?.print();
-      } finally {
-        cleanup();
-      }
-    }, 200);
+  const waitForImages = async (maxMs = 1200) => {
+    try {
+      const d = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!d) return;
+
+      const imgs = Array.from(d.images || []);
+      if (!imgs.length) return;
+
+      const stillLoading = imgs.filter((img) => !(img as any).complete);
+      if (!stillLoading.length) return;
+
+      await Promise.race([
+        Promise.all(
+          stillLoading.map(
+            (img) =>
+              new Promise<void>((resolve) => {
+                const done = () => resolve();
+                img.addEventListener('load', done, { once: true });
+                img.addEventListener('error', done, { once: true });
+              })
+          )
+        ),
+        new Promise<void>((resolve) => setTimeout(resolve, maxMs)),
+      ]);
+    } catch {
+      // ignore
+    }
   };
 
-  // fallback if onload doesn't fire
-  setTimeout(() => {
+  const doPrint = async () => {
     try {
+      await waitForImages();
       w?.focus();
       w?.print();
     } finally {
       cleanup();
     }
+  };
+
+  iframe.onload = () => {
+    setTimeout(() => {
+      void doPrint();
+    }, 200);
+  };
+
+  // fallback if onload doesn't fire
+  setTimeout(() => {
+    void doPrint();
   }, 450);
 }
 
@@ -167,6 +216,9 @@ export default function POS() {
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [branch, setBranch] = useState<BranchMini | null>(null);
 
+  // ✅ resolved logo url for printing (public or signed)
+  const [companyLogoUrl, setCompanyLogoUrl] = useState<string>('');
+
   // ✅ single source of truth for branch filtering
   const branchFilterId = activeBranchId || branchId;
 
@@ -185,16 +237,43 @@ export default function POS() {
         if (companyId) {
           const { data, error } = await (supabase as any)
             .from('companies')
-            .select('id,name,address,phone,email,tax_id')
+            .select('id,name,address,phone,email,tax_id,logo_url') // ✅ include logo_url
             .eq('id', companyId)
             .maybeSingle();
-          if (!error) setCompany((data as CompanyMini) || null);
-          else setCompany(null);
+
+          if (!error) {
+            const c = (data as CompanyMini) || null;
+            setCompany(c);
+
+            // ✅ resolve logo url (http or signed)
+            const raw = String((c as any)?.logo_url ?? '').trim();
+            if (!raw) {
+              setCompanyLogoUrl('');
+            } else if (isHttpUrl(raw)) {
+              setCompanyLogoUrl(raw);
+            } else {
+              try {
+                const { data: signed, error: signErr } = await supabase.storage
+                  .from(COMPANY_LOGO_BUCKET)
+                  .createSignedUrl(raw, SIGNED_URL_TTL);
+
+                if (signErr) throw signErr;
+                setCompanyLogoUrl(signed?.signedUrl || '');
+              } catch {
+                setCompanyLogoUrl('');
+              }
+            }
+          } else {
+            setCompany(null);
+            setCompanyLogoUrl('');
+          }
         } else {
           setCompany(null);
+          setCompanyLogoUrl('');
         }
       } catch {
         setCompany(null);
+        setCompanyLogoUrl('');
       }
 
       // Branch (use branchFilterId, NOT profile.active_branch_id)
@@ -419,19 +498,18 @@ export default function POS() {
   };
 
   const buildPrintHtml = (data: ReceiptData, saleId: string) => {
-    // ✅ Use company + branch for header (NO Philuz at top)
+    // ✅ Use company + branch for header
     const companyName = company?.name?.trim() || 'Company';
     const branchName = branch?.name?.trim() || 'Branch';
+
+    const initials = getInitials(companyName);
+    const logoUrl = (companyLogoUrl || '').trim();
 
     const addr = (branch?.address || company?.address || '').trim();
     const phone = displayGhPhone(branch?.phone || company?.phone || '');
     const email = (branch?.email || company?.email || '').trim();
 
-    const contactLine = cleanLine([
-      addr || null,
-      phone ? `Tel: ${phone}` : null,
-      email || null,
-    ]);
+    const contactLine = cleanLine([addr || null, phone ? `Tel: ${phone}` : null, email || null]);
 
     const receiptNumber = escapeHtml(data.receipt_number);
     const now = new Date(data.created_at || Date.now()).toLocaleString();
@@ -458,8 +536,20 @@ export default function POS() {
       })
       .join('');
 
+    // ✅ NEW: logo slot (or initials fallback) + clean spacing
+    const brandHtml = `
+      <div class="brand">
+        ${
+          logoUrl
+            ? `<img class="logo" src="${escapeHtml(logoUrl)}" alt="Company logo" />`
+            : `<div class="logoFallback">${escapeHtml(initials)}</div>`
+        }
+      </div>
+    `;
+
     const headerHtml = `
       <div class="hdr">
+        ${brandHtml}
         <div class="co">${escapeHtml(companyName)}</div>
         <div class="br">${escapeHtml(branchName)}</div>
         ${contactLine ? `<div class="ct">${escapeHtml(contactLine)}</div>` : ''}
@@ -631,6 +721,30 @@ export default function POS() {
             .paper { width: 340px; max-width: 340px; padding: 16px 8px; }
 
             .hdr { text-align: center; }
+
+            /* ✅ NEW: logo area (or initials fallback) */
+            .brand { display:flex; justify-content:center; align-items:center; margin-bottom: 6px; }
+            .logo {
+              max-width: 62px;
+              max-height: 62px;
+              width: auto;
+              height: auto;
+              object-fit: contain;
+              display:block;
+            }
+            .logoFallback {
+              width: 56px;
+              height: 56px;
+              border: 1px solid #111;
+              border-radius: 10px;
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              font-weight: 900;
+              font-size: 14px;
+              letter-spacing: 0.5px;
+            }
+
             .co { font-weight: 900; font-size: 16px; }
             .br { font-weight: 800; font-size: 12px; margin-top: 2px; }
             .ct { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.25; }

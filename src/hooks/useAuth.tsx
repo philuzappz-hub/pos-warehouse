@@ -17,6 +17,24 @@ type AppRole = "admin" | "cashier" | "warehouse" | "staff";
 const VALID_ROLES: AppRole[] = ["admin", "cashier", "warehouse", "staff"];
 const isAppRole = (v: any): v is AppRole => VALID_ROLES.includes(v);
 
+// ✅ company row used for app-wide branding + PDFs
+export type CompanyMini = {
+  id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  tax_id: string | null;
+  receipt_footer: string | null;
+  logo_url: string | null; // either public URL OR private storage path
+};
+
+// ✅ branch mini for switcher + labels
+export type BranchMini = {
+  id: string;
+  name: string;
+};
+
 interface AuthContextType {
   user: User | null;
   session: Session | null;
@@ -24,12 +42,20 @@ interface AuthContextType {
   profile: Profile | null;
   roles: AppRole[];
 
-  // ✅ company name for UI branding
-  companyName: string | null;
+  // ✅ company branding (best practice)
+  company: CompanyMini | null;
+  companyName: string | null; // backward compatibility
+  companyLogoUrl: string | null; // derived display url (public or signed)
 
   branchId: string | null;
   branchName: string | null;
+
+  // ✅ admin active branch context
   activeBranchId: string | null;
+  activeBranchName: string | null;
+  branches: BranchMini[];
+  refreshBranches: () => Promise<BranchMini[]>;
+
   setActiveBranchId: (branchId: string | null) => void;
 
   loading: boolean;
@@ -56,6 +82,7 @@ interface AuthContextType {
   isReturnsHandler: boolean;
 
   refreshProfile: () => Promise<Profile | null>;
+  refreshCompany: () => Promise<CompanyMini | null>;
 
   createEmployee: (
     email: string,
@@ -91,18 +118,26 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const ADMIN_ACTIVE_BRANCH_KEY = "admin_active_branch_id";
-const ADMIN_ACTIVE_BRANCH_NAME_KEY = "admin_active_branch_name_v1";
 
 const LOADING_WATCHDOG_MS = 8000;
 
-// ✅ profile cache + retries to prevent “refresh looks like logout”
+// ✅ profile cache + retries
 const PROFILE_CACHE_KEY = "cached_profile_v1";
 const PROFILE_CACHE_USER_KEY = "cached_profile_user_id_v1";
 const PROFILE_FETCH_RETRIES = 3;
 
-// ✅ NEW: company name cache to prevent flicker
-const COMPANY_CACHE_KEY = "cached_company_name_v1";
+// ✅ company cache (full row + signed url + expiry)
+const COMPANY_CACHE_KEY = "cached_company_v1";
 const COMPANY_CACHE_USER_KEY = "cached_company_user_id_v1";
+const COMPANY_LOGO_URL_CACHE_KEY = "cached_company_logo_url_v1";
+const COMPANY_LOGO_URL_EXPIRES_AT_KEY = "cached_company_logo_expires_at_v1";
+
+const LOGO_BUCKET = "company-logos";
+const SIGNED_URL_TTL = 60 * 60 * 24; // 24 hours
+
+function isHttpUrl(v: string) {
+  return /^https?:\/\//i.test(v || "");
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let t: number | undefined;
@@ -156,6 +191,26 @@ function getSupabaseUrlFromEnv(): string | null {
   );
 }
 
+/**
+ * ✅ NEW:
+ * Always prefer a stable public site URL for auth emails.
+ * - On localhost, `window.location.origin` = http://localhost:8081 (bad for opening on phone)
+ * - On Vercel, use VITE_SITE_URL = https://pos-warehouse.vercel.app
+ */
+function getSiteUrl(): string {
+  const env =
+    (import.meta.env.VITE_SITE_URL as string | undefined) ||
+    (import.meta.env.VITE_PUBLIC_SITE_URL as string | undefined) ||
+    (import.meta.env.VITE_APP_URL as string | undefined) ||
+    "";
+
+  const v = String(env || "").trim().replace(/\/+$/, "");
+  if (v && /^https?:\/\//i.test(v)) return v;
+
+  // fallback: current origin (works for pure web testing on same device)
+  return window.location.origin;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
@@ -165,11 +220,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const [branchNameState, setBranchNameState] = useState<string | null>(null);
-  const [companyName, setCompanyName] = useState<string | null>(null);
+
+  // ✅ company data in one place
+  const [company, setCompany] = useState<CompanyMini | null>(null);
+  const [companyLogoUrl, setCompanyLogoUrl] = useState<string | null>(null);
+
+  // ✅ keep companyName for existing components
+  const companyName = company?.name ?? null;
+
+  // ✅ branches (for admin switcher + label)
+  const [branchesState, setBranchesState] = useState<BranchMini[]>([]);
+  const [activeBranchNameState, setActiveBranchNameState] = useState<string | null>(null);
 
   const fetchSeq = useRef(0);
   const mountedRef = useRef(true);
   const lastFetchedUserIdRef = useRef<string | null>(null);
+
+  // ✅ NEW: stable company_id + remember last loaded company for branches
+  const companyIdFromProfile = (profile as any)?.company_id ?? null;
 
   const watchdogRef = useRef<number | null>(null);
   const kickWatchdog = () => {
@@ -187,16 +255,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const safeSetProfile = (p: Profile | null) => mountedRef.current && setProfile(p);
   const safeSetRoles = (r: AppRole[]) => mountedRef.current && setRoles(r);
   const safeSetBranchName = (n: string | null) => mountedRef.current && setBranchNameState(n);
-  const safeSetCompanyName = (n: string | null) => mountedRef.current && setCompanyName(n);
   const safeSetLoading = (v: boolean) => mountedRef.current && setLoading(v);
   const safeSetUser = (u: User | null) => mountedRef.current && setUser(u);
   const safeSetSession = (s: Session | null) => mountedRef.current && setSession(s);
+
+  const safeSetCompany = (c: CompanyMini | null) => mountedRef.current && setCompany(c);
+  const safeSetCompanyLogoUrl = (u: string | null) => mountedRef.current && setCompanyLogoUrl(u);
+
+  const safeSetBranches = (b: BranchMini[]) => mountedRef.current && setBranchesState(b);
+  const safeSetActiveBranchName = (n: string | null) =>
+    mountedRef.current && setActiveBranchNameState(n);
 
   const branchId = (profile as any)?.branch_id ?? null;
   const branchName = branchNameState;
 
   const [activeBranchIdState, setActiveBranchIdState] = useState<string | null>(null);
-  const safeSetActiveBranch = (v: string | null) => mountedRef.current && setActiveBranchIdState(v);
+  const safeSetActiveBranch = (v: string | null) =>
+    mountedRef.current && setActiveBranchIdState(v);
 
   const isAdmin = useMemo(() => {
     return roles.includes("admin") || (profile as any)?.is_admin === true;
@@ -210,7 +285,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setActiveBranchId = (newBranchId: string | null) => {
     if (!isAdmin) return;
+
     safeSetActiveBranch(newBranchId);
+
+    if (!newBranchId) safeSetActiveBranchName(null);
+    else {
+      const maybe = branchesState.find((b) => b.id === newBranchId)?.name ?? null;
+      if (maybe) safeSetActiveBranchName(maybe);
+    }
+
     if (newBranchId) localStorage.setItem(ADMIN_ACTIVE_BRANCH_KEY, newBranchId);
     else localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
   };
@@ -256,47 +339,75 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       localStorage.setItem(PROFILE_CACHE_USER_KEY, userId);
       localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(p));
-    } catch {
-      // ignore
-    }
+    } catch {}
   };
 
   const clearCachedProfile = () => {
     try {
       localStorage.removeItem(PROFILE_CACHE_USER_KEY);
       localStorage.removeItem(PROFILE_CACHE_KEY);
-    } catch {
-      // ignore
-    }
+    } catch {}
   };
 
-  const readCachedCompanyName = (userId: string): string | null => {
+  const readCachedCompany = (userId: string): CompanyMini | null => {
     try {
       const cachedUserId = localStorage.getItem(COMPANY_CACHE_USER_KEY);
       if (cachedUserId !== userId) return null;
-      return localStorage.getItem(COMPANY_CACHE_KEY);
+
+      const raw = localStorage.getItem(COMPANY_CACHE_KEY);
+      if (!raw) return null;
+
+      return JSON.parse(raw) as CompanyMini;
     } catch {
       return null;
     }
   };
 
-  const writeCachedCompanyName = (userId: string, name: string | null) => {
+  const writeCachedCompany = (userId: string, c: CompanyMini | null) => {
     try {
       localStorage.setItem(COMPANY_CACHE_USER_KEY, userId);
-      if (name) localStorage.setItem(COMPANY_CACHE_KEY, name);
+      if (c) localStorage.setItem(COMPANY_CACHE_KEY, JSON.stringify(c));
       else localStorage.removeItem(COMPANY_CACHE_KEY);
+    } catch {}
+  };
+
+  const readCachedCompanyLogoUrl = (userId: string): string | null => {
+    try {
+      const cachedUserId = localStorage.getItem(COMPANY_CACHE_USER_KEY);
+      if (cachedUserId !== userId) return null;
+
+      const url = localStorage.getItem(COMPANY_LOGO_URL_CACHE_KEY);
+      const expRaw = localStorage.getItem(COMPANY_LOGO_URL_EXPIRES_AT_KEY);
+      const exp = expRaw ? Number(expRaw) : 0;
+
+      if (!url) return null;
+      if (!exp) return url;
+
+      if (Date.now() > exp) return null;
+      return url;
     } catch {
-      // ignore
+      return null;
     }
   };
 
-  const clearCachedCompanyName = () => {
+  const writeCachedCompanyLogoUrl = (userId: string, url: string | null, expiresAtMs?: number) => {
+    try {
+      localStorage.setItem(COMPANY_CACHE_USER_KEY, userId);
+      if (url) localStorage.setItem(COMPANY_LOGO_URL_CACHE_KEY, url);
+      else localStorage.removeItem(COMPANY_LOGO_URL_CACHE_KEY);
+
+      if (expiresAtMs) localStorage.setItem(COMPANY_LOGO_URL_EXPIRES_AT_KEY, String(expiresAtMs));
+      else localStorage.removeItem(COMPANY_LOGO_URL_EXPIRES_AT_KEY);
+    } catch {}
+  };
+
+  const clearCachedCompany = () => {
     try {
       localStorage.removeItem(COMPANY_CACHE_USER_KEY);
       localStorage.removeItem(COMPANY_CACHE_KEY);
-    } catch {
-      // ignore
-    }
+      localStorage.removeItem(COMPANY_LOGO_URL_CACHE_KEY);
+      localStorage.removeItem(COMPANY_LOGO_URL_EXPIRES_AT_KEY);
+    } catch {}
   };
 
   const buildFallbackProfile = (userId: string): Profile => {
@@ -327,6 +438,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } as unknown as Profile;
   };
 
+  // ✅ staff branch name (their assigned branch)
   const fetchBranchName = async (bId: string | null) => {
     if (!bId) {
       safeSetBranchName(null);
@@ -348,30 +460,175 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const fetchCompanyName = async (userId: string, cId: string | null) => {
-    if (!cId) {
-      safeSetCompanyName(null);
-      writeCachedCompanyName(userId, null);
+  // ✅ admin selected branch name (activeBranchId)
+  const fetchActiveBranchName = async (bId: string | null) => {
+    if (!bId) {
+      safeSetActiveBranchName(null);
       return;
     }
 
     try {
       const queryPromise = Promise.resolve(
-        supabase.from("companies").select("name").eq("id", cId).maybeSingle()
+        supabase.from("branches").select("name").eq("id", bId).maybeSingle()
       );
 
-      const { data, error } = await withTimeout(queryPromise, 3500, "fetchCompanyName");
+      const { data, error } = await withTimeout(queryPromise, 2500, "fetchActiveBranchName");
       if (error) throw error;
 
-      const name = (data as any)?.name ?? null;
-      safeSetCompanyName(name);
-      writeCachedCompanyName(userId, name);
+      safeSetActiveBranchName((data as any)?.name ?? null);
     } catch (e) {
-      console.warn("[useAuth] company name fetch failed:", e);
-      // keep whatever we already have (or cached)
+      console.warn("[useAuth] active branch name fetch failed:", e);
     }
   };
 
+  // ✅ load branches for admin switcher
+  const fetchBranches = async (companyId: string | null): Promise<BranchMini[]> => {
+    if (!companyId) {
+      safeSetBranches([]);
+      return [];
+    }
+
+    try {
+      const queryPromise = Promise.resolve(
+        supabase
+          .from("branches")
+          .select("id,name")
+          .eq("company_id", companyId as any)
+          .eq("is_active", true)
+          .order("name")
+      );
+
+      const { data, error } = await withTimeout(queryPromise, 4500, "fetchBranches");
+      if (error) throw error;
+
+      const list = ((data ?? []) as any[]).map((r) => ({
+        id: String(r.id),
+        name: String(r.name),
+      })) as BranchMini[];
+
+      safeSetBranches(list);
+      return list;
+    } catch (e) {
+      console.warn("[useAuth] branches fetch failed:", e);
+      safeSetBranches([]);
+      return [];
+    }
+  };
+
+  const refreshBranches = async () => {
+    return await fetchBranches(companyIdFromProfile);
+  };
+
+  useEffect(() => {
+    if (!isAdmin) {
+      safeSetBranches([]);
+      return;
+    }
+    if (!companyIdFromProfile) {
+      safeSetBranches([]);
+      return;
+    }
+    fetchBranches(companyIdFromProfile).catch(() => {});
+  }, [isAdmin, companyIdFromProfile]);
+
+  useEffect(() => {
+    if (!isAdmin) {
+      safeSetActiveBranchName(branchNameState ?? null);
+      return;
+    }
+
+    if (!activeBranchIdState) {
+      safeSetActiveBranchName(null);
+      return;
+    }
+
+    const found = branchesState.find((b) => b.id === activeBranchIdState)?.name ?? null;
+    if (found) {
+      safeSetActiveBranchName(found);
+      return;
+    }
+
+    fetchActiveBranchName(activeBranchIdState).catch(() => {});
+  }, [isAdmin, activeBranchIdState, branchesState, branchNameState]);
+
+  // ✅ derive displayable company logo URL
+  const resolveCompanyLogoUrl = async (userId: string, logoValue: string | null) => {
+    if (!logoValue) {
+      safeSetCompanyLogoUrl(null);
+      writeCachedCompanyLogoUrl(userId, null);
+      return null;
+    }
+
+    if (isHttpUrl(logoValue)) {
+      safeSetCompanyLogoUrl(logoValue);
+      writeCachedCompanyLogoUrl(userId, logoValue);
+      return logoValue;
+    }
+
+    try {
+      const queryPromise = Promise.resolve(
+        supabase.storage.from(LOGO_BUCKET).createSignedUrl(logoValue, SIGNED_URL_TTL)
+      );
+
+      const res = await withTimeout(queryPromise as any, 4500, "signCompanyLogoUrl");
+      if ((res as any)?.error) throw (res as any).error;
+
+      const signedUrl = (res as any)?.data?.signedUrl ?? null;
+
+      safeSetCompanyLogoUrl(signedUrl);
+
+      const expiresAtMs = Date.now() + (SIGNED_URL_TTL - 60) * 1000;
+      writeCachedCompanyLogoUrl(userId, signedUrl, expiresAtMs);
+
+      return signedUrl;
+    } catch (e) {
+      console.warn("[useAuth] signCompanyLogoUrl failed:", e);
+      return null;
+    }
+  };
+
+  const fetchCompany = async (
+    userId: string,
+    companyId: string | null
+  ): Promise<CompanyMini | null> => {
+    if (!companyId) {
+      safeSetCompany(null);
+      safeSetCompanyLogoUrl(null);
+      writeCachedCompany(userId, null);
+      writeCachedCompanyLogoUrl(userId, null);
+      return null;
+    }
+
+    try {
+      const queryPromise = Promise.resolve(
+        supabase
+          .from("companies")
+          .select("id,name,address,phone,email,tax_id,receipt_footer,logo_url")
+          .eq("id", companyId)
+          .maybeSingle()
+      );
+
+      const { data, error } = await withTimeout(queryPromise, 4500, "fetchCompany");
+      if (error) throw error;
+
+      const c = (data as CompanyMini) || null;
+      safeSetCompany(c);
+      writeCachedCompany(userId, c);
+
+      await resolveCompanyLogoUrl(userId, c?.logo_url ?? null);
+      return c;
+    } catch (e) {
+      console.warn("[useAuth] company fetch failed:", e);
+      return null;
+    }
+  };
+
+  /**
+   * ✅ IMPORTANT:
+   * This upsert MUST be allowed to insert a profile with company_id NULL for new users.
+   * If profiles.company_id is NOT NULL in DB, signup will fail with:
+   * "null value in column company_id violates not-null constraint"
+   */
   const ensureProfileRowExists = async (userId: string) => {
     try {
       const metaFullName =
@@ -381,18 +638,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const insertPromise = Promise.resolve(
         supabase.from("profiles").upsert(
-          { user_id: userId, full_name: metaFullName } as any,
+          {
+            user_id: userId,
+            full_name: metaFullName,
+            company_id: null,
+            branch_id: null,
+          } as any,
           { onConflict: "user_id" }
         )
       );
 
-      await withTimeout(insertPromise, 2500, "ensureProfileRowExists");
-    } catch (e) {
-      console.warn("[useAuth] ensureProfileRowExists failed (ignored):", e);
+      const { error } = await withTimeout(insertPromise as any, 4000, "ensureProfileRowExists");
+      if (error) throw error;
+    } catch (e: any) {
+      const msg = String(e?.message || "");
+      console.warn("[useAuth] ensureProfileRowExists failed:", e);
+
+      if (msg.includes("company_id") && msg.toLowerCase().includes("not-null")) {
+        console.warn(
+          "[useAuth] Your DB has profiles.company_id NOT NULL. New users cannot sign up until you drop that constraint."
+        );
+      }
     }
   };
 
-  // ✅ retry logic for profile fetch
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   const fetchProfileWithRetry = async (userId: string) => {
@@ -448,18 +717,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const fetchUserData = async (userId: string) => {
     const mySeq = ++fetchSeq.current;
 
-    // ✅ hydrate from cache immediately
     const cachedProfile = readCachedProfile(userId);
-    const cachedCompany = readCachedCompanyName(userId);
+    const cachedCompany = readCachedCompany(userId);
+    const cachedLogoUrl = readCachedCompanyLogoUrl(userId);
 
     if (cachedProfile) {
       applyProfileState(cachedProfile);
+
       fetchBranchName((cachedProfile as any)?.branch_id ?? null).catch(() => {});
-      // hydrate company from cache first (prevents flicker)
-      if (cachedCompany) safeSetCompanyName(cachedCompany);
-      fetchCompanyName(userId, (cachedProfile as any)?.company_id ?? null).catch(() => {});
-    } else {
-      if (cachedCompany) safeSetCompanyName(cachedCompany);
+
+      const cId = (cachedProfile as any)?.company_id ?? null;
+      if (cId) fetchBranches(cId).catch(() => {});
+      if (cId) fetchCompany(userId, cId).catch(() => {});
+    }
+
+    if (cachedCompany) safeSetCompany(cachedCompany);
+
+    if (cachedLogoUrl) {
+      safeSetCompanyLogoUrl(cachedLogoUrl);
+    } else if (cachedCompany?.logo_url) {
+      resolveCompanyLogoUrl(userId, cachedCompany.logo_url).catch(() => {});
     }
 
     try {
@@ -468,13 +745,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!data) {
         await ensureProfileRowExists(userId);
+
         if (cachedProfile) return cachedProfile;
 
         const fallback = buildFallbackProfile(userId);
         applyProfileState(fallback);
         safeSetBranchName(null);
-        safeSetCompanyName(null);
-        writeCachedCompanyName(userId, null);
+
+        safeSetCompany(null);
+        safeSetCompanyLogoUrl(null);
+        writeCachedCompany(userId, null);
+        writeCachedCompanyLogoUrl(userId, null);
+
+        safeSetBranches([]);
+        safeSetActiveBranchName(null);
+
         return fallback;
       }
 
@@ -485,13 +770,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         fetchSeq.current++;
         lastFetchedUserIdRef.current = null;
+
         safeSetProfile(null);
         safeSetRoles([]);
         safeSetActiveBranch(null);
         safeSetBranchName(null);
-        safeSetCompanyName(null);
+
+        safeSetCompany(null);
+        safeSetCompanyLogoUrl(null);
+
+        safeSetBranches([]);
+        safeSetActiveBranchName(null);
+
         clearCachedProfile();
-        clearCachedCompanyName();
+        clearCachedCompany();
+
         return null;
       }
 
@@ -499,22 +792,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       writeCachedProfile(userId, data);
 
       fetchBranchName((data as any)?.branch_id ?? null).catch(() => {});
-      fetchCompanyName(userId, (data as any)?.company_id ?? null).catch(() => {});
+
+      const cId = (data as any)?.company_id ?? null;
+      fetchCompany(userId, cId).catch(() => {});
+      if (cId) fetchBranches(cId).catch(() => {});
 
       return data as unknown as Profile | null;
     } catch (err) {
       console.error("[useAuth] Error fetching user data:", err);
 
-      // ✅ if we have cache, keep working
       if (cachedProfile) return cachedProfile;
 
       if (mySeq === fetchSeq.current) {
         const fallback = buildFallbackProfile(userId);
         applyProfileState(fallback);
         safeSetBranchName(null);
-        safeSetCompanyName(null);
-        writeCachedCompanyName(userId, null);
+
+        safeSetCompany(null);
+        safeSetCompanyLogoUrl(null);
+        writeCachedCompany(userId, null);
+        writeCachedCompanyLogoUrl(userId, null);
+
+        safeSetBranches([]);
+        safeSetActiveBranchName(null);
       }
+
       return buildFallbackProfile(userId);
     } finally {
       if (mySeq === fetchSeq.current) {
@@ -530,6 +832,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     kickWatchdog();
     const p = await fetchUserData(user.id);
     return p as unknown as Profile | null;
+  };
+
+  const refreshCompany = async () => {
+    if (!user?.id) return null;
+    const cId = (profile as any)?.company_id ?? null;
+    const updated = await fetchCompany(user.id, cId);
+    return updated;
   };
 
   useEffect(() => {
@@ -552,30 +861,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         kickWatchdog();
         await fetchUserData(uid);
       } else {
-  fetchSeq.current++;
-  lastFetchedUserIdRef.current = null;
+        fetchSeq.current++;
+        lastFetchedUserIdRef.current = null;
 
-  safeSetProfile(null);
-  safeSetRoles([]);
-  safeSetActiveBranch(null);
-  safeSetBranchName(null);
-  safeSetCompanyName(null);
+        safeSetProfile(null);
+        safeSetRoles([]);
+        safeSetActiveBranch(null);
+        safeSetBranchName(null);
 
-  clearCachedProfile();
-  clearCachedCompanyName();
+        safeSetCompany(null);
+        safeSetCompanyLogoUrl(null);
 
-  // ✅ clear admin branch selection + label
-  try {
-    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
-    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
-  } catch {
-    // ignore
-  }
+        safeSetBranches([]);
+        safeSetActiveBranchName(null);
 
-  safeSetLoading(false);
-  stopWatchdog();
-}
+        clearCachedProfile();
+        clearCachedCompany();
 
+        try {
+          localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+        } catch {}
+
+        safeSetLoading(false);
+        stopWatchdog();
+      }
     });
 
     (async () => {
@@ -631,19 +940,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null, needsCompanySetup };
   };
 
+  /**
+   * ✅ UPDATED:
+   * Use VITE_SITE_URL for emailRedirectTo so confirmation links always open on Vercel,
+   * even if signup was done on localhost.
+   */
   const signUp = async (email: string, password: string, fullName: string) => {
+    const redirectTo = `${getSiteUrl()}/`;
+
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        emailRedirectTo: `${window.location.origin}/`,
+        emailRedirectTo: redirectTo,
         data: { full_name: fullName },
       },
     });
 
     if (error) return { error: error as Error };
+
+    // For email-confirm projects, session might be null until confirmed.
+    // Still return needsCompanySetup=true (setup happens after they confirm + login).
     if (!data.user?.id) return { error: null, needsCompanySetup: true };
 
+    // If Supabase instantly returns a session (email confirm off), hydrate.
     safeSetLoading(true);
     kickWatchdog();
     const p = await fetchUserData(data.user.id);
@@ -663,7 +983,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const expiresAtMs = (sess.expires_at ?? 0) * 1000;
     const msLeft = expiresAtMs - Date.now();
 
-    // Refresh if expiring soon
     if (expiresAtMs && msLeft < 60_000) {
       const { data: refreshed, error } = await supabase.auth.refreshSession();
       if (error) throw error;
@@ -674,7 +993,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return sess.access_token;
   };
 
-  // ✅ project mismatch check
   const ensureTokenMatchesThisProject = (accessToken: string) => {
     const url = getSupabaseUrlFromEnv();
     if (!url) throw new Error("Missing VITE_SUPABASE_URL in .env");
@@ -690,7 +1008,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ Edge caller
   const callEdge = async <T,>(
     slug: string,
     body: unknown,
@@ -801,12 +1118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!role) return { error: new Error("Missing role") };
       if (!branchId) return { error: new Error("Missing branchId") };
 
-      await callEdge<{ ok: boolean }>("update-employee", {
-        userId,
-        role,
-        branch_id: branchId,
-      });
-
+      await callEdge<{ ok: boolean }>("update-employee", { userId, role, branch_id: branchId });
       return { error: null, ok: true };
     } catch (e: any) {
       return { error: e instanceof Error ? e : new Error(String(e)) };
@@ -818,33 +1130,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!userId) return { error: new Error("Missing userId") };
       if (!field) return { error: new Error("Missing field") };
 
-      await callEdge<{ ok: boolean }>("update-employee", {
-        userId,
-        [field]: Boolean(value),
-      });
-
+      await callEdge<{ ok: boolean }>("update-employee", { userId, [field]: Boolean(value) });
       return { error: null, ok: true };
     } catch (e: any) {
       return { error: e instanceof Error ? e : new Error(String(e)) };
     }
   };
 
- const signOut = async () => {
-  clearCachedProfile();
-  clearCachedCompanyName();
+  const signOut = async () => {
+    clearCachedProfile();
+    clearCachedCompany();
 
-  // ✅ clear admin branch selection + label
-  try {
-    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
-    localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
-  } catch {
-    // ignore
-  }
+    try {
+      localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+    } catch {}
 
-  safeSetCompanyName(null);
-  await supabase.auth.signOut();
-};
+    safeSetBranches([]);
+    safeSetActiveBranchName(null);
 
+    safeSetCompany(null);
+    safeSetCompanyLogoUrl(null);
+    await supabase.auth.signOut();
+  };
 
   const hasRole = (role: AppRole) =>
     roles.includes(role) || (role === "admin" && (profile as any)?.is_admin === true);
@@ -857,11 +1164,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profile,
         roles,
 
+        company,
         companyName,
+        companyLogoUrl,
 
         branchId,
         branchName,
+
         activeBranchId,
+        activeBranchName: activeBranchNameState,
+        branches: branchesState,
+        refreshBranches,
+
         setActiveBranchId,
 
         loading,
@@ -878,6 +1192,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isReturnsHandler,
 
         refreshProfile,
+        refreshCompany,
+
         createEmployee,
         deleteEmployee,
         repairMissingCompanyId,

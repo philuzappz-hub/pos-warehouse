@@ -49,6 +49,15 @@ import Index from "./pages/Index";
 // ✅ Employee pending page
 import PendingAccess from "./pages/PendingAccess";
 
+// ✅ Admin Settings Control Panel
+import BranchSettings from "./pages/settings/BranchSettings";
+import CompanySettings from "./pages/settings/CompanySettings";
+import SettingsLayout from "./pages/settings/SettingsLayout";
+import StaffSettings from "./pages/settings/StaffSettings";
+
+// ✅ NEW: System settings page (create this file)
+import SystemSettings from "./pages/settings/SystemSettings";
+
 const queryClient = new QueryClient();
 
 function FullScreenLoading({ label = "Loading..." }: { label?: string }) {
@@ -80,8 +89,8 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
 
 /**
  * ✅ PendingAccessRoute
- * - If user is already assigned (company OR branch) AND has a role (or admin),
- *   they should NOT be stuck on /pending-access.
+ * - ONLY for employees who are already linked to a company/branch but still waiting for role/activation
+ * - NEW USERS with no company/branch should go to /setup-company (not pending)
  */
 function PendingAccessRoute({ children }: { children: ReactNode }) {
   const { user, loading, profile, isAdmin } = useAuth();
@@ -93,18 +102,20 @@ function PendingAccessRoute({ children }: { children: ReactNode }) {
   const isAssigned = !!profile.company_id || !!profile.branch_id;
   const hasRole = !!profile.role || isAdmin;
 
-  // ✅ assigned users should never stay on pending page
+  // ✅ NEW: If NOT assigned at all, they should create a company
+  if (!isAssigned) return <Navigate to="/setup-company" replace />;
+
+  // ✅ assigned users with role should never stay on pending page
   if (isAssigned && hasRole) return <Navigate to="/" replace />;
 
   return <Layout>{children}</Layout>;
 }
 
 /**
- * ✅ SetupCompanyRoute
- * - Only true admin candidates should be here
- * - If company exists already → leave setup
- * - If employee already assigned to a branch (even if company_id is null) → leave setup
- * - If NOT admin → go pending access (they can't create company)
+ * ✅ SetupCompanyRoute (UPDATED)
+ * - Any user with NO company_id and NO branch_id can create a company (become admin through RPC)
+ * - If already has company_id → leave setup
+ * - If employee has branch assignment → they shouldn't be here
  */
 function SetupCompanyRoute({ children }: { children: ReactNode }) {
   const { user, loading, profile, isAdmin } = useAuth();
@@ -119,22 +130,20 @@ function SetupCompanyRoute({ children }: { children: ReactNode }) {
   if (profile.company_id) return <Navigate to="/" replace />;
 
   // ✅ employees with a branch assignment should NOT be in setup-company
-  if (isAssigned && !isAdmin) return <Navigate to="/" replace />;
-
-  // ✅ only admins can create company
-  if (!isAdmin && profile.role !== "admin") {
+  // (they are invited employees waiting for admin)
+  if (isAssigned && !isAdmin && profile.role !== "admin") {
     return <Navigate to="/pending-access" replace />;
   }
 
+  // ✅ NEW: unassigned users are allowed here even if not admin yet
+  // They become admin during the RPC in SetupCompany
   return <Layout>{children}</Layout>;
 }
 
 /**
- * ✅ RoleProtectedRoute (FIXED)
- * - wait for profile before role checks / redirects
- * - Admin should NOT automatically pass cashier/warehouse routes.
- *   Admin only passes if "admin" is explicitly in allowedRoles.
- * - "Assigned" means company OR branch (because employees may only have branch_id)
+ * ✅ RoleProtectedRoute (UPDATED)
+ * - if user is NOT assigned at all (no company & no branch) -> always go setup-company
+ * - pending-access becomes only for users who ARE assigned but missing role
  */
 function RoleProtectedRoute({
   children,
@@ -163,14 +172,9 @@ function RoleProtectedRoute({
 
   const isAssigned = !!profile.company_id || !!profile.branch_id;
 
-  // ✅ If user is not assigned at all:
-  // - admin candidate can go setup
-  // - employees go pending
+  // ✅ NEW: If user is not assigned at all -> setup-company
   if (!isAssigned) {
-    if (isAdmin || profile.role === "admin") {
-      return <Navigate to="/setup-company" replace />;
-    }
-    return <Navigate to="/pending-access" replace />;
+    return <Navigate to="/setup-company" replace />;
   }
 
   // ✅ If assigned but role not set (and not admin) → pending access
@@ -263,6 +267,22 @@ function AppRoutes() {
           </RoleProtectedRoute>
         }
       />
+
+      {/* ✅ Admin Settings Control Panel */}
+      <Route
+        path="/settings"
+        element={
+          <RoleProtectedRoute allowedRoles={["admin"]}>
+            <SettingsLayout />
+          </RoleProtectedRoute>
+        }
+      >
+        <Route index element={<Navigate to="company" replace />} />
+        <Route path="company" element={<CompanySettings />} />
+        <Route path="branches" element={<BranchSettings />} />
+        <Route path="staff" element={<StaffSettings />} />
+        <Route path="system" element={<SystemSettings />} />
+      </Route>
 
       {/* Cashier only */}
       <Route
@@ -384,38 +404,35 @@ function AppRoutes() {
         }
       />
 
-    {/* Expenses Overview: everyone who can access expenses */}
-<Route
-  path="/expenses"
-  element={
-    <RoleProtectedRoute
-      allowedRoles={["cashier", "admin"]}
-      allowReturnsHandler
-    >
-      <Expenses />
-    </RoleProtectedRoute>
-  }
-/>
+      {/* Expenses Overview */}
+      <Route
+        path="/expenses"
+        element={
+          <RoleProtectedRoute allowedRoles={["cashier", "admin"]} allowReturnsHandler>
+            <Expenses />
+          </RoleProtectedRoute>
+        }
+      />
 
-{/* New Expense: ONLY Admin + Cashier (NOT returns handler) */}
-<Route
-  path="/expenses/new"
-  element={
-    <RoleProtectedRoute allowedRoles={["cashier", "admin"]}>
-      <ExpenseNew />
-    </RoleProtectedRoute>
-  }
-/>
+      {/* New Expense */}
+      <Route
+        path="/expenses/new"
+        element={
+          <RoleProtectedRoute allowedRoles={["cashier", "admin"]}>
+            <ExpenseNew />
+          </RoleProtectedRoute>
+        }
+      />
 
-{/* Pending Queue: ONLY Admin + Returns Handler (cashier shouldn’t approve) */}
-<Route
-  path="/expenses/pending"
-  element={
-    <RoleProtectedRoute allowedRoles={["admin"]} allowReturnsHandler>
-      <PendingExpenses />
-    </RoleProtectedRoute>
-  }
-/>
+      {/* Pending Queue */}
+      <Route
+        path="/expenses/pending"
+        element={
+          <RoleProtectedRoute allowedRoles={["admin"]} allowReturnsHandler>
+            <PendingExpenses />
+          </RoleProtectedRoute>
+        }
+      />
 
       {/* Daily Sales Report (Cashier only) */}
       <Route

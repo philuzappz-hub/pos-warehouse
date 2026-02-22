@@ -103,6 +103,29 @@ function formatDateLabel(dateStr: string) {
   });
 }
 
+async function urlToDataUrl(url?: string | null): Promise<string | null> {
+  const u = (url || "").trim();
+  if (!u) return null;
+
+  try {
+    const res = await fetch(u, { mode: "cors" });
+    if (!res.ok) return null;
+
+    const blob = await res.blob();
+
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+
+    return dataUrl;
+  } catch {
+    return null;
+  }
+}
+
 export default function Attendance() {
   const { toast } = useToast();
   const {
@@ -113,6 +136,7 @@ export default function Attendance() {
     activeBranchId,
     companyName,
     activeBranchName, // if your useAuth provides it
+    companyLogoUrl, // ✅ signed/public logo URL from useAuth (for PDFs)
   } = useAuth() as any;
 
   const canManage = isAdmin || isAttendanceManager;
@@ -226,7 +250,7 @@ export default function Attendance() {
       return [];
     }
 
-    // branches table in your screenshots has: id, name, address, phone, email, company_id, is_active
+    // branches table: id, name, address, phone, email, company_id, is_active
     const { data, error } = await supabase
       .from("branches")
       .select("id,name,address,phone,email,company_id,is_active")
@@ -474,6 +498,13 @@ export default function Attendance() {
         border: 1px solid var(--border); background: var(--soft);
         display:flex; align-items:center; justify-content:center;
         font-weight: 900; letter-spacing: .5px;
+        overflow:hidden;
+      }
+      .logoImg {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display:block;
       }
       .brand { font-weight: 900; font-size: 18px; }
       .sub { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
@@ -523,20 +554,18 @@ export default function Attendance() {
   `;
 
   /**
-   * Contact rules (your request):
+   * Contact rules:
    * - If ALL branches: show one combined "Company Contacts" (no per-branch listing)
    * - If selected branch: show only that branch contact
    */
   const buildContactBlockHtml = () => {
     const co = companyName || "Company";
-    const initials = companyInitials(co);
 
     const selectedBranch =
       activeBranchId ? branchContacts.find((b) => b.id === activeBranchId) : null;
 
     if (!activeBranchId) {
-      // ALL branches: combined contacts only (ignore per-branch addresses)
-      // We'll combine phones/emails from branches into one line (unique)
+      // ALL branches: combined contacts only
       const phones = Array.from(
         new Set(branchContacts.map((b) => (b.phone || "").trim()).filter(Boolean))
       );
@@ -573,12 +602,11 @@ export default function Attendance() {
     `;
   };
 
-  const buildPdfHeader = (title: string, subtitle: string) => {
+  const buildPdfHeader = (title: string, subtitle: string, logoDataUrl: string | null) => {
     const co = companyName || "Company";
     const initials = companyInitials(co);
 
-    // Your request:
-    // - If branch selected: show ONLY the branch name (no "Scope: Branch: ...")
+    // - If branch selected: show ONLY branch name
     // - If all branches: show "All Branches"
     const scopeLine = activeBranchId
       ? (branchContacts.find((b) => b.id === activeBranchId)?.name ||
@@ -586,10 +614,14 @@ export default function Attendance() {
           "Selected Branch")
       : "All Branches";
 
+    const logoHtml = logoDataUrl
+      ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
+      : escapeHtml(initials);
+
     return `
       <div class="header">
         <div class="brandRow">
-          <div class="logoBadge">${escapeHtml(initials)}</div>
+          <div class="logoBadge">${logoHtml}</div>
           <div>
             <div class="brand">${escapeHtml(co)}</div>
             <div style="font-weight:800; margin-top:2px;">${escapeHtml(title)}</div>
@@ -659,7 +691,10 @@ export default function Attendance() {
     if (!companyId) return;
 
     try {
-      const summary = await buildAbsenceSummaryForRange(weekStart, weekEnd);
+      const [summary, logoDataUrl] = await Promise.all([
+        buildAbsenceSummaryForRange(weekStart, weekEnd),
+        urlToDataUrl(companyLogoUrl),
+      ]);
 
       const rowsHtml = summary.perStaff
         .sort((a, b) => b.absent - a.absent)
@@ -686,7 +721,7 @@ export default function Attendance() {
             <div class="paper">
               <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
 
-              ${buildPdfHeader("Weekly Absence Summary", `${weekStart} to ${weekEnd}`)}
+              ${buildPdfHeader("Weekly Absence Summary", `${weekStart} to ${weekEnd}`, logoDataUrl)}
 
               ${buildContactBlockHtml()}
 
@@ -775,7 +810,10 @@ export default function Attendance() {
     const to = isoDate(new Date(Number(yy), Number(mm), 0));
 
     try {
-      const summary = await buildAbsenceSummaryForRange(from, to);
+      const [summary, logoDataUrl] = await Promise.all([
+        buildAbsenceSummaryForRange(from, to),
+        urlToDataUrl(companyLogoUrl),
+      ]);
 
       const rowsHtml = summary.perStaff
         .sort((a, b) => b.absent - a.absent)
@@ -802,7 +840,7 @@ export default function Attendance() {
             <div class="paper">
               <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
 
-              ${buildPdfHeader("Monthly Absence Summary", `Month: ${selectedMonth}`)}
+              ${buildPdfHeader("Monthly Absence Summary", `Month: ${selectedMonth}`, logoDataUrl)}
 
               ${buildContactBlockHtml()}
 
@@ -889,8 +927,11 @@ export default function Attendance() {
     if (!companyId) return;
 
     try {
-      const emps = await fetchEmployeesList();
-      const dayRows = await fetchAttendanceForRange(selectedDay, selectedDay);
+      const [emps, dayRows, logoDataUrl] = await Promise.all([
+        fetchEmployeesList(),
+        fetchAttendanceForRange(selectedDay, selectedDay),
+        urlToDataUrl(companyLogoUrl),
+      ]);
 
       const attended = new Set(dayRows.map((r) => r.user_id));
       const absentees = emps.filter((e) => !attended.has(e.user_id));
@@ -918,7 +959,7 @@ export default function Attendance() {
             <div class="paper">
               <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
 
-              ${buildPdfHeader("Daily Absentees Report", `Date: ${selectedDay}`)}
+              ${buildPdfHeader("Daily Absentees Report", `Date: ${selectedDay}`, logoDataUrl)}
 
               ${buildContactBlockHtml()}
 

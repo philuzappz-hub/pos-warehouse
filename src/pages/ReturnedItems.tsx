@@ -80,9 +80,32 @@ type BranchMini = {
   email: string | null;
 };
 
+async function urlToDataUrl(url: string): Promise<{ dataUrl: string; format: 'PNG' | 'JPEG' } | null> {
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return null;
+
+    const blob = await res.blob();
+    const mime = (blob.type || '').toLowerCase();
+    const format: 'PNG' | 'JPEG' = mime.includes('jpeg') || mime.includes('jpg') ? 'JPEG' : 'PNG';
+
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read logo blob'));
+      reader.readAsDataURL(blob);
+    });
+
+    if (!dataUrl) return null;
+    return { dataUrl, format };
+  } catch {
+    return null;
+  }
+}
+
 export default function ReturnedItems() {
   const { toast } = useToast();
-  const { profile, activeBranchId } = useAuth();
+  const { profile, activeBranchId, company, companyLogoUrl } = useAuth() as any;
 
   const [returns, setReturns] = useState<ReturnWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
@@ -99,35 +122,31 @@ export default function ReturnedItems() {
   // ✅ export scope (summary only vs items only vs both)
   const [exportScope, setExportScope] = useState<ExportScope>('both');
 
-  // ✅ company/branch (for branded PDF header)
-  const [company, setCompany] = useState<CompanyMini | null>(null);
+  // ✅ branch (for branded PDF header)
   const [branch, setBranch] = useState<BranchMini | null>(null);
 
+  // ✅ logo data for jsPDF (must be dataURL, not remote URL)
+  const [logoDataUrl, setLogoDataUrl] = useState<string>('');
+  const [logoFormat, setLogoFormat] = useState<'PNG' | 'JPEG'>('PNG');
+
+  // Load branch (admin active branch OR staff branch)
   useEffect(() => {
     const companyId = (profile as any)?.company_id ?? null;
     if (!companyId) {
-      setCompany(null);
       setBranch(null);
       return;
     }
 
+    const bId = activeBranchId || (profile as any)?.branch_id || null;
+    if (!bId) {
+      setBranch(null);
+      return;
+    }
+
+    let cancelled = false;
+
     (async () => {
       try {
-        const { data: c, error: cErr } = await (supabase as any)
-          .from('companies')
-          .select('id,name,address,phone,email,tax_id,receipt_footer,logo_url')
-          .eq('id', companyId)
-          .maybeSingle();
-
-        if (cErr) throw cErr;
-        setCompany((c as CompanyMini) || null);
-
-        const bId = activeBranchId || (profile as any)?.branch_id || null;
-        if (!bId) {
-          setBranch(null);
-          return;
-        }
-
         const { data: b, error: bErr } = await (supabase as any)
           .from('branches')
           .select('id,name,address,phone,email')
@@ -135,13 +154,43 @@ export default function ReturnedItems() {
           .maybeSingle();
 
         if (bErr) throw bErr;
-        setBranch((b as BranchMini) || null);
+        if (!cancelled) setBranch((b as BranchMini) || null);
       } catch {
-        setCompany(null);
-        setBranch(null);
+        if (!cancelled) setBranch(null);
       }
     })();
-  }, [(profile as any)?.company_id, activeBranchId]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [(profile as any)?.company_id, (profile as any)?.branch_id, activeBranchId]);
+
+  // Load logo as dataURL for jsPDF
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const url = String(companyLogoUrl || '').trim();
+      if (!url) {
+        setLogoDataUrl('');
+        return;
+      }
+
+      const converted = await urlToDataUrl(url);
+      if (cancelled) return;
+
+      if (converted?.dataUrl) {
+        setLogoDataUrl(converted.dataUrl);
+        setLogoFormat(converted.format);
+      } else {
+        setLogoDataUrl('');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [companyLogoUrl]);
 
   useEffect(() => {
     fetchReturns();
@@ -442,7 +491,7 @@ export default function ReturnedItems() {
     toast({ title: 'Export complete', description: 'Downloaded 2 CSV files (summary + items).' });
   };
 
-  // ✅ PDF export (CLEAN HEADER: no overlap)
+  // ✅ PDF export (CLEAN HEADER + LOGO)
   const exportPDF = async () => {
     if (!filteredGroupedReturns || filteredGroupedReturns.length === 0) {
       toast({ title: 'Nothing to export', description: 'No rows match your filters.' });
@@ -478,58 +527,83 @@ export default function ReturnedItems() {
         .filter(Boolean)
         .join('  •  ');
 
-      const companyName = company?.name?.trim() || 'Company';
+      const companyName = (company?.name?.trim() as string) || 'Company';
       const branchName = branch?.name?.trim() || '';
 
       const headerAddress = (branch?.address?.trim() || company?.address?.trim() || '').trim();
       const headerPhone = (branch?.phone?.trim() || company?.phone?.trim() || '').trim();
       const headerEmail = (branch?.email?.trim() || company?.email?.trim() || '').trim();
 
-      const contactParts = [headerAddress || null, headerPhone ? `Tel: ${headerPhone}` : null, headerEmail || null].filter(
-        Boolean
-      ) as string[];
+      const contactParts = [
+        headerAddress || null,
+        headerPhone ? `Tel: ${headerPhone}` : null,
+        headerEmail || null,
+      ].filter(Boolean) as string[];
 
       const headerTextMaxWidth = pageWidth - marginX * 2;
 
-      // returns the Y where the header ends (so tables can start below it)
-      const drawHeader = () => {
-        let y = 34;
+    const drawHeader = () => {
+  let y = 34;
 
-        doc.setFontSize(14);
-        doc.text(companyName, marginX, y);
+  const logoSize = 42;
+  const hasLogo = !!logoDataUrl;
+  const logoX = marginX;
+  const logoY = y - 12;
 
-        doc.setFontSize(9);
-        doc.text(`Generated: ${now}`, pageWidth - marginX, y, { align: 'right' });
+  // left text column starts AFTER logo (when logo exists)
+  const leftX = hasLogo ? marginX + logoSize + 12 : marginX;
 
-        y += 18;
+  // max width for wrapped text in that left column
+  const leftMaxWidth = pageWidth - leftX - marginX;
 
-        doc.setFontSize(11);
-        doc.text(`${reportTitle} (${scopeTitle})`, marginX, y);
-        y += 14;
+  if (hasLogo) {
+    try {
+      doc.addImage(logoDataUrl, logoFormat, logoX, logoY, logoSize, logoSize);
+    } catch {
+      // ignore logo failures
+    }
+  }
 
-        doc.setFontSize(9);
-        const contactLine = contactParts.length ? contactParts.join(' • ') : '—';
-        const contactLines = doc.splitTextToSize(contactLine, headerTextMaxWidth);
-        doc.text(contactLines, marginX, y);
-        y += contactLines.length * 12;
+  // Company name (left) + generated time (right)
+  doc.setFontSize(14);
+  doc.text(companyName, leftX, y);
 
-        if (branchName) {
-          doc.text(`Branch: ${branchName}`, marginX, y);
-          y += 12;
-        }
+  doc.setFontSize(9);
+  doc.text(`Generated: ${now}`, pageWidth - marginX, y, { align: 'right' });
 
-        if (filtersLine) {
-          const filterLines = doc.splitTextToSize(filtersLine, headerTextMaxWidth);
-          doc.text(filterLines, marginX, y);
-          y += filterLines.length * 12;
-        }
+  y += 18;
 
-        // divider line
-        doc.setLineWidth(0.6);
-        doc.line(marginX, y, pageWidth - marginX, y);
+  // Report title
+  doc.setFontSize(11);
+  doc.text(`${reportTitle} (${scopeTitle})`, leftX, y);
+  y += 14;
 
-        return y; // bottom of header
-      };
+  // Contact line (wrap) — NOW starts at leftX so it never sits under logo
+  doc.setFontSize(9);
+  const contactLine = contactParts.length ? contactParts.join(' • ') : '—';
+  const contactLines = doc.splitTextToSize(contactLine, leftMaxWidth);
+  doc.text(contactLines, leftX, y);
+  y += contactLines.length * 12;
+
+  // Branch line
+  if (branchName) {
+    doc.text(`Branch: ${branchName}`, leftX, y);
+    y += 12;
+  }
+
+  // Filters line (wrap)
+  if (filtersLine) {
+    const filterLines = doc.splitTextToSize(filtersLine, leftMaxWidth);
+    doc.text(filterLines, leftX, y);
+    y += filterLines.length * 12;
+  }
+
+  // Divider line full width
+  doc.setLineWidth(0.6);
+  doc.line(marginX, y, pageWidth - marginX, y);
+
+  return y;
+};
 
       const drawFooter = (pageNumber: number, totalPages: number) => {
         const y = pageHeight - 40;
@@ -564,9 +638,7 @@ export default function ReturnedItems() {
         autoTable(doc, {
           startY,
           margin: { left: marginX, right: marginX },
-          head: [
-            ['Receipt #', 'Customer', 'Status', 'Items', 'Total Qty', 'Reason', 'Initiated By', 'Approved By', 'Date/Time'],
-          ],
+          head: [['Receipt #', 'Customer', 'Status', 'Items', 'Total Qty', 'Reason', 'Initiated By', 'Approved By', 'Date/Time']],
           body: rows,
           styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
           headStyles: { fontSize: 8 },

@@ -62,6 +62,11 @@ type CompanyRow = {
   address: string | null;
   phone: string | null;
   email: string | null;
+
+  // ✅ logo fields (optional, depends on your schema)
+  logo_url?: string | null;
+  receipt_footer?: string | null;
+  tax_id?: string | null;
 };
 
 type BranchCompareRow = {
@@ -100,20 +105,49 @@ function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
-function initials(name: string) {
-  const parts = String(name || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (!parts.length) return "CO";
-  const a = parts[0]?.[0] || "";
-  const b = parts.length > 1 ? parts[1]?.[0] || "" : parts[0]?.[1] || "";
-  return (a + b).toUpperCase();
+/** Turn "Wemah Company Limited" -> "WCL" */
+function companyInitials(name: string) {
+  const cleaned = String(name || "")
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .trim();
+  if (!cleaned) return "CO";
+
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  const take = parts.slice(0, 3);
+  const initials = take.map((p) => p[0]?.toUpperCase() ?? "").join("");
+  return initials || "CO";
+}
+
+async function urlToDataUrl(url?: string | null): Promise<string | null> {
+  const u = (url || "").trim();
+  if (!u) return null;
+
+  try {
+    const res = await fetch(u, { mode: "cors" });
+    if (!res.ok) return null;
+
+    const blob = await res.blob();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+
+    return dataUrl;
+  } catch {
+    return null;
+  }
 }
 
 export default function Reports() {
   const { toast } = useToast();
-  const { activeBranchId, profile, companyName } = useAuth() as any;
+  const {
+    activeBranchId,
+    profile,
+    companyName,
+    companyLogoUrl, // ✅ logo from useAuth (same idea as Expenses)
+  } = useAuth() as any;
 
   const companyId = (profile as any)?.company_id ?? null;
 
@@ -174,7 +208,7 @@ export default function Reports() {
       // cast to any to avoid schema/type drift errors
       const { data: co, error: coErr } = await (supabase as any)
         .from("companies")
-        .select("id,name,address,phone,email")
+        .select("id,name,address,phone,email,logo_url,receipt_footer,tax_id")
         .eq("id", companyId)
         .maybeSingle();
 
@@ -460,7 +494,6 @@ export default function Reports() {
 
   /** -----------------------------
    * Branch comparison (ALL branches only)
-   * - sums sales + approved returns + approved expenses per branch
    * ------------------------------*/
   const fetchBranchComparison = async () => {
     if (!companyId) return;
@@ -604,7 +637,7 @@ export default function Reports() {
   };
 
   /** -----------------------------
-   * PDF Export (updated to match new flow)
+   * PDF Export (MATCH Attendance/Expenses format ✅ + LOGO ✅)
    * ------------------------------*/
   const openPdfWindow = (html: string) => {
     const win = window.open("", "_blank");
@@ -623,45 +656,64 @@ export default function Reports() {
 
   const basePdfCss = `
     <style>
-      :root {
-        --border:#e5e7eb;
-        --muted:#6b7280;
-        --text:#111827;
-        --bg:#ffffff;
-        --card:#f8fafc;
+      :root { --border:#e5e7eb; --muted:#6b7280; --text:#111827; --soft:#f9fafb; }
+      body { font-family: Arial, sans-serif; padding: 18px; color: var(--text); }
+      .paper { max-width: 980px; margin: 0 auto; }
+      .printBtn { margin-bottom: 12px; }
+
+      .header {
+        display:flex; justify-content:space-between; align-items:flex-start; gap:14px;
+        border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;
       }
-      body { font-family: Arial, sans-serif; padding: 18px; color: var(--text); background: var(--bg); }
-      .paper { max-width: 1040px; margin: 0 auto; }
-      .printBtn { margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor:pointer; }
-      .header { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 14px; }
-      .brandWrap { display:flex; gap:12px; align-items:center; }
-      .logo {
-        width: 46px; height: 46px; border-radius: 14px;
-        background: linear-gradient(135deg, #111827, #334155);
-        color: #fff; display:flex; align-items:center; justify-content:center;
+      .brandRow { display:flex; gap:12px; align-items:center; }
+      .logoBadge {
+        width:56px; height:56px; border-radius: 14px;
+        border: 1px solid var(--border); background: var(--soft);
+        display:flex; align-items:center; justify-content:center;
         font-weight: 900; letter-spacing: .5px;
+        overflow:hidden;
       }
+      .logoImg { width:100%; height:100%; object-fit:contain; display:block; }
       .brand { font-weight: 900; font-size: 18px; }
-      .sub { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.45; }
+      .sub { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
       .meta { text-align:right; font-size: 12px; color: var(--muted); }
       .meta b { color: var(--text); }
-      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
-      .box { padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); font-size: 13px; }
-      .boxTitle { font-weight: 800; margin-bottom: 6px; }
-      .row { margin: 2px 0; }
-      .cards { display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 10px; }
-      .kpi { border: 1px solid var(--border); border-radius: 14px; background: #fff; padding: 10px 12px; }
-      .kpi .label { font-size: 12px; color: var(--muted); }
-      .kpi .val { font-size: 18px; font-weight: 900; margin-top: 6px; }
-      table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+
+      .cards { display:flex; gap:10px; flex-wrap:wrap; margin: 12px 0 10px; }
+      .kpi {
+        flex: 1 1 180px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: white;
+      }
+      .kpi .label { font-size: 11px; color: var(--muted); }
+      .kpi .value { font-size: 20px; font-weight: 900; margin-top: 4px; }
+      .kpi .small { font-size: 11px; color: var(--muted); margin-top: 4px; line-height:1.35; }
+
+      .box {
+        margin: 10px 0 14px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: white;
+      }
+      .boxTitle { font-weight: 800; margin-bottom: 8px; }
+      .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+      table { width: 100%; border-collapse: collapse; font-size: 12px; background:white; }
       th, td { border: 1px solid var(--border); padding: 8px; vertical-align: top; }
-      th { background: #f9fafb; text-align: left; }
-      .right { text-align:right; }
+      th { background: #f3f4f6; text-align: left; }
       .muted { color: var(--muted); }
-      .sectionTitle { font-weight: 900; margin-top: 14px; }
-      .sigRow { display:flex; gap: 18px; margin-top: 18px; }
-      .sigBox { flex: 1; border-top: 1px solid var(--border); padding-top: 8px; font-size: 12px; color: var(--muted); }
-      .sigBox b { color: var(--text); }
+      .right { text-align:right; }
+      .nowrap { white-space: nowrap; }
+
+      .sigRow { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 18px; }
+      .sigBox { font-size: 12px; }
+      .sigLine { border-bottom: 1px solid #9ca3af; height: 18px; margin-top: 18px; }
+      .sigLabel { color: var(--muted); margin-top: 6px; }
+
       @media print {
         .printBtn { display:none; }
         body { padding:0; }
@@ -670,197 +722,290 @@ export default function Reports() {
     </style>
   `;
 
+  const buildPdfHeader = (title: string, subtitle: string, logoDataUrl: string | null) => {
+    const co = (company?.name || companyName || "Company") as string;
+    const initials = companyInitials(co);
+
+    const scopeLine = activeBranchId
+      ? (selectedBranch?.name || "Selected Branch")
+      : "All Branches";
+
+    const logoHtml = logoDataUrl
+      ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
+      : escapeHtml(initials);
+
+    return `
+      <div class="header">
+        <div class="brandRow">
+          <div class="logoBadge">${logoHtml}</div>
+          <div>
+            <div class="brand">${escapeHtml(co)}</div>
+            <div style="font-weight:800; margin-top:2px;">${escapeHtml(title)}</div>
+            <div class="sub">
+              ${escapeHtml(subtitle)}<br/>
+              ${escapeHtml(scopeLine)}
+            </div>
+          </div>
+        </div>
+        <div class="meta">
+          <div><b>Generated:</b> ${escapeHtml(new Date().toLocaleString())}</div>
+          <div><b>Currency:</b> GHS</div>
+        </div>
+      </div>
+    `;
+  };
+
+  /**
+   * ✅ MATCH your Attendance rule:
+   * - If ALL branches: show one "Company Contacts" only (no branch listing)
+   * - If selected branch: show only that branch contact
+   */
   const buildPdfContactsHtml = () => {
     const coName = (company?.name || companyName || "Company") as string;
 
     if (activeBranchId && selectedBranch) {
       return `
         <div class="box">
-          <div class="boxTitle">Contact</div>
-          <div class="row"><b>Branch:</b> ${escapeHtml(selectedBranch.name)}</div>
-          <div class="row"><b>Address:</b> ${escapeHtml(selectedBranch.address || "-")}</div>
-          <div class="row"><b>Phone:</b> ${escapeHtml(selectedBranch.phone || "-")}</div>
-          <div class="row"><b>Email:</b> ${escapeHtml(selectedBranch.email || "-")}</div>
+          <div class="boxTitle">Branch Contacts</div>
+          <div class="muted" style="font-size:12px; line-height:1.5;">
+            <div><b>Branch:</b> ${escapeHtml(selectedBranch.name)}</div>
+            <div><b>Address:</b> ${escapeHtml(selectedBranch.address || "-")}</div>
+            <div><b>Phone:</b> ${escapeHtml(selectedBranch.phone || "-")}</div>
+            <div><b>Email:</b> ${escapeHtml(selectedBranch.email || "-")}</div>
+          </div>
         </div>
       `;
     }
 
-    const branchContacts = (branches ?? [])
-      .map((b) => {
-        const phone = b.phone ? `Phone: ${escapeHtml(b.phone)}` : "";
-        const email = b.email ? `Email: ${escapeHtml(b.email)}` : "";
-        const sep = phone && email ? " • " : "";
-        const details = `${phone}${sep}${email}`.trim() || "-";
-        return `<div class="row"><b>${escapeHtml(b.name)}:</b> ${details}</div>`;
-      })
-      .join("");
-
     return `
       <div class="box">
-        <div class="boxTitle">Company Contact</div>
-        <div class="row"><b>Company:</b> ${escapeHtml(coName)}</div>
-        <div class="row"><b>Address:</b> ${escapeHtml(company?.address || "-")}</div>
-        <div class="row"><b>Phone:</b> ${escapeHtml(company?.phone || "-")}</div>
-        <div class="row"><b>Email:</b> ${escapeHtml(company?.email || "-")}</div>
-        <div style="margin-top:10px;">
-          <div class="boxTitle">Branch Contacts</div>
-          ${branchContacts || `<div class="row muted">No branches found.</div>`}
+        <div class="boxTitle">Company Contacts</div>
+        <div class="muted" style="font-size:12px; line-height:1.5;">
+          <div><b>Company:</b> ${escapeHtml(coName)}</div>
+          <div><b>Address:</b> ${escapeHtml(company?.address || "-")}</div>
+          <div><b>Phone:</b> ${escapeHtml(company?.phone || "-")}</div>
+          <div><b>Email:</b> ${escapeHtml(company?.email || "-")}</div>
         </div>
       </div>
     `;
   };
 
-  const exportReportPdf = () => {
+  const exportReportPdf = async () => {
     const coName = (company?.name || companyName || "Company") as string;
-    const title = "Reports & Analytics";
-    const subtitle = `${startDate} to ${endDate} • ${scopeLabel}`;
 
-    const topProductsRows = topProducts
-      .map(
-        (p, i) => `
-          <tr>
-            <td>${i + 1}</td>
-            <td>${escapeHtml(p.name)}</td>
-            <td class="right">${escapeHtml(p.total_qty)}</td>
-            <td class="right">GHC ${money(p.total_revenue)}</td>
-          </tr>
-        `
-      )
-      .join("");
+    try {
+      // ✅ embed logo for reliable printing
+      const logoDataUrl = await urlToDataUrl(companyLogoUrl || company?.logo_url || null);
 
-    const lowStockRows = lowStockProducts
-      .map(
-        (p, i) => `
-          <tr>
-            <td>${i + 1}</td>
-            <td>${escapeHtml(p.name)}</td>
-            <td class="right">${escapeHtml(p.quantity_in_stock)}</td>
-            <td class="right">${escapeHtml(p.reorder_level || 10)}</td>
-          </tr>
-        `
-      )
-      .join("");
+      const title = "Reports & Analytics";
+      const subtitle = `${startDate} to ${endDate}`;
 
-    const html = `
-      <html>
-        <head>
-          <title>${escapeHtml(title)} (${escapeHtml(subtitle)})</title>
-          ${basePdfCss}
-        </head>
-        <body>
-          <div class="paper">
-            <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
+      const topProductsRows = topProducts
+        .map(
+          (p, i) => `
+            <tr>
+              <td class="nowrap">${i + 1}</td>
+              <td>${escapeHtml(p.name)}</td>
+              <td class="right">${escapeHtml(p.total_qty)}</td>
+              <td class="right">GHC ${escapeHtml(money(p.total_revenue))}</td>
+            </tr>
+          `
+        )
+        .join("");
 
-            <div class="header">
-              <div class="brandWrap">
-                <div class="logo">${escapeHtml(initials(coName))}</div>
-                <div>
-                  <div class="brand">${escapeHtml(coName)}</div>
-                  <div class="sub">
-                    <b>${escapeHtml(title)}</b><br/>
-                    ${escapeHtml(subtitle)}
+      const lowStockRows = lowStockProducts
+        .map(
+          (p, i) => `
+            <tr>
+              <td class="nowrap">${i + 1}</td>
+              <td>${escapeHtml(p.name)}</td>
+              <td class="right">${escapeHtml(p.quantity_in_stock)}</td>
+              <td class="right">${escapeHtml(p.reorder_level || 10)}</td>
+            </tr>
+          `
+        )
+        .join("");
+
+      const compareHtml =
+        !activeBranchId && compareRows.length
+          ? `
+            <div class="box">
+              <div class="boxTitle">Branch Comparison (Selected period)</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Branch</th>
+                    <th class="right">Sales</th>
+                    <th class="right">Revenue</th>
+                    <th class="right">Deductions</th>
+                    <th class="right">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${compareRows
+                    .map(
+                      (r) => `
+                        <tr>
+                          <td>
+                            ${escapeHtml(r.branch_name)}
+                            <div class="muted" style="font-size:11px; margin-top:3px;">
+                              Returns: GHC ${escapeHtml(money(r.approved_returns))} • Expenses: GHC ${escapeHtml(
+                        money(r.approved_expenses)
+                      )}
+                            </div>
+                          </td>
+                          <td class="right">${escapeHtml(r.total_sales)}</td>
+                          <td class="right">GHC ${escapeHtml(money(r.total_revenue))}</td>
+                          <td class="right">GHC ${escapeHtml(money(r.total_deductions))}</td>
+                          <td class="right">GHC ${escapeHtml(money(r.net_after_deductions))}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+          : ``;
+
+      const html = `
+        <html>
+          <head>
+            <title>${escapeHtml(title)} (${escapeHtml(subtitle)})</title>
+            ${basePdfCss}
+          </head>
+          <body>
+            <div class="paper">
+              <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
+
+              ${buildPdfHeader(title, subtitle, logoDataUrl)}
+
+              <div class="grid2">
+                ${buildPdfContactsHtml()}
+                <div class="box">
+                  <div class="boxTitle">Notes</div>
+                  <div class="muted" style="font-size:12px; line-height:1.5;">
+                    <div>• Total deductions = Approved returns + Approved expenses</div>
+                    <div>• Net revenue = Total revenue − Total deductions</div>
+                    <div style="margin-top:6px;">
+                      Breakdown: returns GHC ${escapeHtml(money(salesSummary.returnsApprovedAmount))}
+                      • expenses GHC ${escapeHtml(money(salesSummary.expensesApprovedAmount))}
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div class="meta">
-                <div><b>Generated:</b> ${escapeHtml(new Date().toLocaleString())}</div>
-                <div><b>Currency:</b> GHS</div>
+              <div class="cards">
+                <div class="kpi">
+                  <div class="label">Total Sales</div>
+                  <div class="value">${escapeHtml(salesSummary.totalSales)}</div>
+                  <div class="small">transactions</div>
+                </div>
+                <div class="kpi">
+                  <div class="label">Total Revenue</div>
+                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalAmount))}</div>
+                  <div class="small">gross revenue</div>
+                </div>
+                <div class="kpi">
+                  <div class="label">Total Deductions</div>
+                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalDeductions))}</div>
+                  <div class="small">
+                    ${escapeHtml(
+                      `${salesSummary.returnsApprovedCount} returns approved • ${salesSummary.returnsPendingCount} pending • ${salesSummary.expensesApprovedCount} expenses approved`
+                    )}
+                  </div>
+                </div>
+                <div class="kpi">
+                  <div class="label">Net After Deductions</div>
+                  <div class="value">GHC ${escapeHtml(money(salesSummary.netAfterDeductions))}</div>
+                  <div class="small">revenue − deductions</div>
+                </div>
               </div>
-            </div>
 
-            <div class="grid2">
-              ${buildPdfContactsHtml()}
+              ${compareHtml}
+
               <div class="box">
-                <div class="boxTitle">Notes</div>
-                <div class="row">• Total deductions = Approved returns + Approved expenses</div>
-                <div class="row">• Net revenue = Total revenue − Total deductions</div>
-                <div class="row muted">Breakdown: returns GHC ${money(
-                  salesSummary.returnsApprovedAmount
-                )} • expenses GHC ${money(salesSummary.expensesApprovedAmount)}</div>
+                <div class="boxTitle">Top Selling Products (Last 30 Days)</div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="width:42px;">#</th>
+                      <th>Product</th>
+                      <th class="right" style="width:120px;">Qty</th>
+                      <th class="right" style="width:170px;">Revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${
+                      topProducts.length
+                        ? topProductsRows
+                        : `<tr><td colspan="4" class="muted">No sales data available.</td></tr>`
+                    }
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="box">
+                <div class="boxTitle">Low Stock Alert</div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="width:42px;">#</th>
+                      <th>Product</th>
+                      <th class="right" style="width:120px;">In Stock</th>
+                      <th class="right" style="width:140px;">Reorder At</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${
+                      lowStockProducts.length
+                        ? lowStockRows
+                        : `<tr><td colspan="4" class="muted">All products are well stocked.</td></tr>`
+                    }
+                  </tbody>
+                </table>
+
+                <div class="muted" style="margin-top:10px; font-size:12px;">
+                  Attendance today: ${escapeHtml(
+                    `${attendanceSummary.present_today}/${attendanceSummary.total_staff}`
+                  )} staff present.
+                </div>
+
+                <div class="sigRow">
+                  <div class="sigBox">
+                    <b>Prepared by:</b>
+                    <div class="sigLine"></div>
+                    <div class="sigLabel">Signature</div>
+                  </div>
+                  <div class="sigBox">
+                    <b>Checked by:</b>
+                    <div class="sigLine"></div>
+                    <div class="sigLabel">Signature</div>
+                  </div>
+                  <div class="sigBox">
+                    <b>Approved by:</b>
+                    <div class="sigLine"></div>
+                    <div class="sigLabel">Signature</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="muted" style="margin-top:12px; font-size:11px;">
+                ${escapeHtml(company?.receipt_footer || "Powered by Philuz Appz")}
               </div>
             </div>
+          </body>
+        </html>
+      `;
 
-            <div class="cards">
-              <div class="kpi">
-                <div class="label">Total Sales</div>
-                <div class="val">${escapeHtml(salesSummary.totalSales)}</div>
-                <div class="muted">transactions</div>
-              </div>
-              <div class="kpi">
-                <div class="label">Total Revenue</div>
-                <div class="val">GHC ${money(salesSummary.totalAmount)}</div>
-                <div class="muted">gross revenue</div>
-              </div>
-              <div class="kpi">
-                <div class="label">Total Deductions</div>
-                <div class="val">GHC ${money(salesSummary.totalDeductions)}</div>
-                <div class="muted">${escapeHtml(
-                  `${salesSummary.returnsApprovedCount} returns approved • ${salesSummary.returnsPendingCount} pending • ${salesSummary.expensesApprovedCount} expenses approved`
-                )}</div>
-              </div>
-              <div class="kpi">
-                <div class="label">Net Revenue</div>
-                <div class="val">GHC ${money(salesSummary.netAfterDeductions)}</div>
-                <div class="muted">after deductions</div>
-              </div>
-            </div>
-
-            <div class="sectionTitle">Top Selling Products (Last 30 Days)</div>
-            <table>
-              <thead>
-                <tr>
-                  <th style="width:42px;">#</th>
-                  <th>Product</th>
-                  <th class="right" style="width:120px;">Qty</th>
-                  <th class="right" style="width:170px;">Revenue</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${
-                  topProducts.length
-                    ? topProductsRows
-                    : `<tr><td colspan="4" class="muted">No sales data available.</td></tr>`
-                }
-              </tbody>
-            </table>
-
-            <div class="sectionTitle">Low Stock Alert</div>
-            <table>
-              <thead>
-                <tr>
-                  <th style="width:42px;">#</th>
-                  <th>Product</th>
-                  <th class="right" style="width:120px;">In Stock</th>
-                  <th class="right" style="width:140px;">Reorder At</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${
-                  lowStockProducts.length
-                    ? lowStockRows
-                    : `<tr><td colspan="4" class="muted">All products are well stocked.</td></tr>`
-                }
-              </tbody>
-            </table>
-
-            <div class="muted" style="margin-top:10px;">
-              Attendance today: ${escapeHtml(
-                `${attendanceSummary.present_today}/${attendanceSummary.total_staff}`
-              )} staff present.
-            </div>
-
-            <div class="sigRow">
-              <div class="sigBox"><b>Prepared by:</b><br/>Signature: ____________________</div>
-              <div class="sigBox"><b>Checked by:</b><br/>Signature: ____________________</div>
-              <div class="sigBox"><b>Approved by:</b><br/>Signature: ____________________</div>
-            </div>
-          </div>
-        </body>
-      </html>
-    `;
-
-    openPdfWindow(html);
+      openPdfWindow(html);
+    } catch (e: any) {
+      toast({
+        title: "Export failed",
+        description: e?.message || "Could not export",
+        variant: "destructive",
+      });
+    }
   };
 
   return (
@@ -916,128 +1061,114 @@ export default function Reports() {
         </CardContent>
       </Card>
 
-     {/* Summary Cards (clean accounting flow) */}
-<div className="bg-slate-800/20 border border-slate-700 rounded-xl p-3">
-  {/* 
-    - Mobile: horizontal scroll, cards keep nice width
-    - Desktop: wraps into a grid automatically
-  */}
-  <div className="flex gap-4 overflow-x-auto pb-2 snap-x snap-mandatory lg:grid lg:grid-cols-3 xl:grid-cols-6 lg:overflow-visible">
-    {/* Card base class to keep consistent sizing */}
-    {/** Tip: w-[260px] makes them readable on mobile */}
-    <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-slate-400">
-          Total Sales
-        </CardTitle>
-        <BarChart3 className="h-5 w-5 text-blue-500" />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-white">
-          {salesSummary.totalSales}
-        </div>
-        <p className="text-xs text-slate-400">transactions</p>
-      </CardContent>
-    </Card>
+      {/* Summary Cards (clean accounting flow) */}
+      <div className="bg-slate-800/20 border border-slate-700 rounded-xl p-3">
+        <div className="flex gap-4 overflow-x-auto pb-2 snap-x snap-mandatory lg:grid lg:grid-cols-3 xl:grid-cols-6 lg:overflow-visible">
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Total Sales
+              </CardTitle>
+              <BarChart3 className="h-5 w-5 text-blue-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                {salesSummary.totalSales}
+              </div>
+              <p className="text-xs text-slate-400">transactions</p>
+            </CardContent>
+          </Card>
 
-    <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-slate-400">
-          Total Revenue
-        </CardTitle>
-        <TrendingUp className="h-5 w-5 text-green-500" />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-white">
-          GHC {money(salesSummary.totalAmount)}
-        </div>
-        <p className="text-xs text-slate-400">gross revenue</p>
-      </CardContent>
-    </Card>
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Total Revenue
+              </CardTitle>
+              <TrendingUp className="h-5 w-5 text-green-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                GHC {money(salesSummary.totalAmount)}
+              </div>
+              <p className="text-xs text-slate-400">gross revenue</p>
+            </CardContent>
+          </Card>
 
-    {/* ✅ Approved Returns card (restored) */}
-    <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-slate-400">
-          Approved Returns
-        </CardTitle>
-        <TrendingUp className="h-5 w-5 text-orange-500" />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-white">
-          GHC {money(salesSummary.returnsApprovedAmount)}
-        </div>
-        <p className="text-xs text-slate-400">
-          {salesSummary.returnsApprovedCount} approved •{" "}
-          {salesSummary.returnsPendingCount} pending
-        </p>
-      </CardContent>
-    </Card>
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Approved Returns
+              </CardTitle>
+              <TrendingUp className="h-5 w-5 text-orange-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                GHC {money(salesSummary.returnsApprovedAmount)}
+              </div>
+              <p className="text-xs text-slate-400">
+                {salesSummary.returnsApprovedCount} approved •{" "}
+                {salesSummary.returnsPendingCount} pending
+              </p>
+            </CardContent>
+          </Card>
 
-    {/* ✅ Approved Expenses card */}
-    <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-slate-400">
-          Approved Expenses
-        </CardTitle>
-        <TrendingUp className="h-5 w-5 text-amber-500" />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-white">
-          GHC {money(salesSummary.expensesApprovedAmount)}
-        </div>
-        <p className="text-xs text-slate-400">
-          {salesSummary.expensesApprovedCount} approved
-        </p>
-      </CardContent>
-    </Card>
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Approved Expenses
+              </CardTitle>
+              <TrendingUp className="h-5 w-5 text-amber-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                GHC {money(salesSummary.expensesApprovedAmount)}
+              </div>
+              <p className="text-xs text-slate-400">
+                {salesSummary.expensesApprovedCount} approved
+              </p>
+            </CardContent>
+          </Card>
 
-    {/* ✅ Total deductions card (Returns + Expenses) */}
-    <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-slate-400">
-          Total Deductions
-        </CardTitle>
-        <TrendingUp className="h-5 w-5 text-red-400" />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-white">
-          GHC {money(salesSummary.totalDeductions)}
-        </div>
-        <p className="text-xs text-slate-400">
-          returns + expenses
-        </p>
-        <p className="text-[11px] text-slate-500 mt-1">
-          Returns: GHC {money(salesSummary.returnsApprovedAmount)} • Expenses: GHC{" "}
-          {money(salesSummary.expensesApprovedAmount)}
-        </p>
-      </CardContent>
-    </Card>
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Total Deductions
+              </CardTitle>
+              <TrendingUp className="h-5 w-5 text-red-400" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                GHC {money(salesSummary.totalDeductions)}
+              </div>
+              <p className="text-xs text-slate-400">returns + expenses</p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Returns: GHC {money(salesSummary.returnsApprovedAmount)} • Expenses: GHC{" "}
+                {money(salesSummary.expensesApprovedAmount)}
+              </p>
+            </CardContent>
+          </Card>
 
-    {/* ✅ Net after deductions */}
-    <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-slate-400">
-          Net After Deductions
-        </CardTitle>
-        <TrendingUp className="h-5 w-5 text-emerald-500" />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-white">
-          GHC {money(salesSummary.netAfterDeductions)}
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Net After Deductions
+              </CardTitle>
+              <TrendingUp className="h-5 w-5 text-emerald-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                GHC {money(salesSummary.netAfterDeductions)}
+              </div>
+              <p className="text-xs text-slate-400">revenue − deductions</p>
+            </CardContent>
+          </Card>
         </div>
-        <p className="text-xs text-slate-400">
-          revenue − deductions
-        </p>
-      </CardContent>
-    </Card>
-  </div>
 
-  {/* Optional: subtle helper hint on mobile */}
-  <div className="text-[11px] text-slate-500 mt-2 lg:hidden">
-    Swipe left/right to view more cards →
-  </div>
-</div>
+        <div className="text-[11px] text-slate-500 mt-2 lg:hidden">
+          Swipe left/right to view more cards →
+        </div>
+      </div>
+
       {/* Branch comparison (ALL branches only) */}
       {!activeBranchId && (
         <Card className="bg-slate-800/50 border-slate-700">

@@ -29,16 +29,26 @@ function normalizeCode(v: string) {
 function makeSuggestedCode(branchName: string) {
   const base = normalizeCode(branchName).replace(/[^A-Z0-9-]/g, "");
   if (!base) return "";
-  // keep it reasonable length
   return base.slice(0, 12);
 }
 
 export default function SetupCompany() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const { user, profile, loading, refreshProfile } = useAuth();
+
+  const {
+    user,
+    profile,
+    loading,
+    refreshProfile,
+    refreshCompany,
+    refreshBranches,
+    setActiveBranchId,
+    repairMissingCompanyId,
+  } = useAuth();
 
   const [submitting, setSubmitting] = useState(false);
+  const [repairing, setRepairing] = useState(false);
 
   // Company required
   const [companyName, setCompanyName] = useState("");
@@ -63,7 +73,7 @@ export default function SetupCompany() {
     },
   ]);
 
-  const alreadySetup = useMemo(() => !!profile?.company_id, [profile?.company_id]);
+  const alreadySetup = useMemo(() => !!(profile as any)?.company_id, [profile]);
 
   useEffect(() => {
     if (loading) return;
@@ -101,9 +111,37 @@ export default function SetupCompany() {
   };
 
   const removeBranch = (index: number) => {
-    // prevent removing main branch row
-    if (index === 0) return;
+    if (index === 0) return; // don't remove main branch
     setBranches((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const tryRepairProfile = async () => {
+    setRepairing(true);
+    try {
+      const res = await repairMissingCompanyId();
+      if (res.error) throw res.error;
+
+      await refreshProfile();
+      await refreshCompany();
+      await refreshBranches();
+
+      toast({
+        title: "Repair completed",
+        description: `Repaired: ${res.repaired ?? 0}`,
+      });
+
+      // if it now has company, go home
+      const p = await refreshProfile();
+      if ((p as any)?.company_id) navigate("/", { replace: true });
+    } catch (e: any) {
+      toast({
+        title: "Repair failed",
+        description: e?.message || "Could not repair profile.",
+        variant: "destructive",
+      });
+    } finally {
+      setRepairing(false);
+    }
   };
 
   const onSubmit = async (e: React.FormEvent) => {
@@ -119,7 +157,7 @@ export default function SetupCompany() {
       return;
     }
 
-    // Validate extra branches: if user started filling one, it must have a name
+    // Validate extra branches: if started, must have name
     for (let i = 1; i < branches.length; i++) {
       const b = branches[i];
       const touched =
@@ -162,14 +200,14 @@ export default function SetupCompany() {
       if (result.ok === false) {
         toast({
           title: "Setup blocked",
-          description: "error" in result && result.error ? result.error : "Could not complete setup.",
+          description: ("error" in result && result.error) ? result.error : "Could not complete setup.",
           variant: "destructive",
         });
         return;
       }
 
       // 2) Update company fields (optional)
-      const companyUpdate: Record<string, string> = {};
+      const companyUpdate: Record<string, any> = {};
       if (companyAddress.trim()) companyUpdate.address = companyAddress.trim();
       if (companyPhone.trim()) companyUpdate.phone = companyPhone.trim();
       if (companyEmail.trim()) companyUpdate.email = companyEmail.trim();
@@ -192,7 +230,7 @@ export default function SetupCompany() {
         }
       }
 
-      // 3) Update MAIN branch fields (optional) using returned branch_id
+      // 3) Update MAIN branch fields (optional)
       const main = branches[0];
       const mainBranchUpdate: Record<string, any> = {};
       const mainCode = normalizeCode(main.code || "");
@@ -217,7 +255,7 @@ export default function SetupCompany() {
         }
       }
 
-      // 4) Insert EXTRA branches (if any)
+      // 4) Insert EXTRA branches
       const extras = branches
         .slice(1)
         .map((b) => ({
@@ -239,30 +277,31 @@ export default function SetupCompany() {
             description: insErr.message,
             variant: "destructive",
           });
-          // Do not block navigation; company is created and admin is set.
         }
       }
 
-      // 5) Refresh profile from DB
+      // 5) Refresh profile/company/branches
       const refreshed = await refreshProfile();
-      const hasCompany = !!refreshed?.company_id;
-      const isAdmin = refreshed?.role === "admin" || (refreshed as any)?.is_admin === true;
+      await refreshCompany();
+      await refreshBranches();
+
+      // Make admin active branch = main branch
+      setActiveBranchId(result.branch_id);
+
+      const hasCompany = !!(refreshed as any)?.company_id;
+      const isAdmin = (refreshed as any)?.role === "admin" || (refreshed as any)?.is_admin === true;
 
       if (!hasCompany || !isAdmin) {
         toast({
           title: "Company created, but access not activated",
           description:
-            "Your company was created, but your profile was not updated with company_id/admin role. This is a database/RPC/RLS issue.",
+            "Company exists, but your profile didn’t get company_id/admin role. Click 'Repair Profile' below.",
           variant: "destructive",
         });
         return;
       }
 
-      toast({
-        title: "Success",
-        description: "Company created. You are now the Admin.",
-      });
-
+      toast({ title: "Success", description: "Company created. You are now the Admin." });
       navigate("/", { replace: true });
     } catch (err: any) {
       toast({
@@ -427,7 +466,6 @@ export default function SetupCompany() {
                           className="bg-slate-700 border-slate-600 text-white"
                           placeholder="e.g. TAM-1002"
                           onBlur={() => {
-                            // auto-suggest if empty
                             if (!branches[i].code?.trim() && branches[i].name?.trim()) {
                               updateBranch(i, { code: makeSuggestedCode(branches[i].name) });
                             }
@@ -482,9 +520,21 @@ export default function SetupCompany() {
               </div>
             </div>
 
-            <Button type="submit" className="w-full" disabled={submitting}>
+            <Button type="submit" className="w-full" disabled={submitting || repairing}>
               {submitting ? "Creating..." : "Create Company & Become Admin"}
             </Button>
+
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full"
+                onClick={tryRepairProfile}
+                disabled={repairing || submitting}
+              >
+                {repairing ? "Repairing..." : "Repair Profile (if stuck)"}
+              </Button>
+            </div>
 
             <p className="text-xs text-slate-400">
               After setup, you can still add more branches and staff from the Admin panel.
