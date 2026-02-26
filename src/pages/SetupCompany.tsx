@@ -1,3 +1,4 @@
+// src/pages/SetupCompany.tsx
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
@@ -9,9 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-type RpcResult =
-  | { ok: true; company_id: string; branch_id: string }
-  | { ok: false; error?: string };
+type RpcRow = { company_id: string; branch_id: string };
 
 type BranchDraft = {
   name: string;
@@ -32,6 +31,12 @@ function makeSuggestedCode(branchName: string) {
   return base.slice(0, 12);
 }
 
+function pickRpcRow(data: any): RpcRow | null {
+  if (!data) return null;
+  if (Array.isArray(data)) return (data[0] as RpcRow) ?? null;
+  return data as RpcRow;
+}
+
 export default function SetupCompany() {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -45,7 +50,7 @@ export default function SetupCompany() {
     refreshBranches,
     setActiveBranchId,
     repairMissingCompanyId,
-  } = useAuth();
+  } = useAuth() as any;
 
   const [submitting, setSubmitting] = useState(false);
   const [repairing, setRepairing] = useState(false);
@@ -119,7 +124,7 @@ export default function SetupCompany() {
     setRepairing(true);
     try {
       const res = await repairMissingCompanyId();
-      if (res.error) throw res.error;
+      if (res?.error) throw res.error;
 
       await refreshProfile();
       await refreshCompany();
@@ -127,10 +132,9 @@ export default function SetupCompany() {
 
       toast({
         title: "Repair completed",
-        description: `Repaired: ${res.repaired ?? 0}`,
+        description: `Repaired: ${res?.repaired ?? 0}`,
       });
 
-      // if it now has company, go home
       const p = await refreshProfile();
       if ((p as any)?.company_id) navigate("/", { replace: true });
     } catch (e: any) {
@@ -182,13 +186,22 @@ export default function SetupCompany() {
       return;
     }
 
+    // Full name for bootstrap function
+    const fullName =
+      String((profile as any)?.full_name || "").trim() ||
+      String((user as any)?.user_metadata?.full_name || "").trim() ||
+      String(user.email || "").trim() ||
+      "Admin";
+
     setSubmitting(true);
 
     try {
-      // 1) Create company + MAIN branch + claim admin
-      const { data, error } = await supabase.rpc("create_company_and_claim_admin", {
+      // ✅ IMPORTANT FIX:
+      // Always pass _full_name so PostgREST doesn't try to find a 2-arg signature in schema cache.
+      const { data, error } = await (supabase as any).rpc("create_company_and_claim_admin", {
+        _branch: branches[0].name.trim(),
         _company_name: companyName.trim(),
-        _branch_name: branches[0].name.trim(),
+        _full_name: fullName,
       });
 
       if (error) {
@@ -196,11 +209,11 @@ export default function SetupCompany() {
         return;
       }
 
-      const result = (data as unknown as RpcResult) ?? { ok: false };
-      if (result.ok === false) {
+      const row = pickRpcRow(data);
+      if (!row?.company_id || !row?.branch_id) {
         toast({
-          title: "Setup blocked",
-          description: ("error" in result && result.error) ? result.error : "Could not complete setup.",
+          title: "Setup failed",
+          description: "RPC returned no company/branch ids.",
           variant: "destructive",
         });
         return;
@@ -219,7 +232,7 @@ export default function SetupCompany() {
         const { error: updCompanyErr } = await supabase
           .from("companies")
           .update(companyUpdate)
-          .eq("id", result.company_id);
+          .eq("id", row.company_id);
 
         if (updCompanyErr) {
           toast({
@@ -244,7 +257,7 @@ export default function SetupCompany() {
         const { error: updBranchErr } = await supabase
           .from("branches")
           .update(mainBranchUpdate)
-          .eq("id", result.branch_id);
+          .eq("id", row.branch_id);
 
         if (updBranchErr) {
           toast({
@@ -259,7 +272,7 @@ export default function SetupCompany() {
       const extras = branches
         .slice(1)
         .map((b) => ({
-          company_id: result.company_id,
+          company_id: row.company_id,
           name: b.name.trim(),
           code: normalizeCode(b.code || makeSuggestedCode(b.name)),
           email: b.email?.trim() || null,
@@ -285,11 +298,12 @@ export default function SetupCompany() {
       await refreshCompany();
       await refreshBranches();
 
-      // Make admin active branch = main branch
-      setActiveBranchId(result.branch_id);
+      // Make admin active branch = main branch (for branch switcher context)
+      setActiveBranchId(row.branch_id);
 
       const hasCompany = !!(refreshed as any)?.company_id;
-      const isAdmin = (refreshed as any)?.role === "admin" || (refreshed as any)?.is_admin === true;
+      const isAdmin =
+        (refreshed as any)?.role === "admin" || (refreshed as any)?.is_admin === true;
 
       if (!hasCompany || !isAdmin) {
         toast({

@@ -49,6 +49,7 @@ const UNIT_OPTIONS = [
 type CategoryRow = {
   id: string;
   name: string;
+  company_id?: string; // optional in UI
 };
 
 type BranchRow = {
@@ -68,6 +69,7 @@ type ProductRow = {
   quantity_in_stock: number;
   category_id: string | null;
   branch_id: string | null;
+  company_id?: string | null;
   category?: CategoryRow | null;
 };
 
@@ -108,8 +110,16 @@ export default function Inventory() {
   // Category form
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
   const [categoryName, setCategoryName] = useState("");
+  const [categoryDescription, setCategoryDescription] = useState("");
 
-  const companyId = (profile as any)?.company_id ?? null;
+  // ✅ single source of truth for company
+  const companyId: string | null = (profile as any)?.company_id ?? null;
+
+  // ✅ TS(2589) workaround: avoid deep generic inference on chained calls
+  const productsTbl = useMemo(() => supabase.from("products") as any, []);
+  const categoriesTbl = useMemo(() => supabase.from("categories") as any, []);
+  const branchesTbl = useMemo(() => supabase.from("branches") as any, []);
+  const stockReceiptsTbl = useMemo(() => supabase.from("stock_receipts") as any, []);
 
   const branchNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -148,18 +158,24 @@ export default function Inventory() {
   };
 
   const fetchProducts = async () => {
-    // ✅ safer: if staff has no active branch, show nothing
+    if (!companyId) {
+      setProducts([]);
+      return;
+    }
+
     if (!isAdmin && !activeBranchId) {
       setProducts([]);
       return;
     }
 
-    let q = supabase.from("products").select("*, category:categories(id,name)").order("name");
+    let q = productsTbl
+      .select("*, category:categories(id,name)")
+      .match({ company_id: companyId })
+      .order("name");
 
     if (activeBranchId) {
-      q = q.eq("branch_id", activeBranchId);
+      q = q.match({ branch_id: activeBranchId });
     }
-    // else admin with no activeBranchId => show all (no filter)
 
     const { data, error } = await q;
 
@@ -173,12 +189,22 @@ export default function Inventory() {
   };
 
   const fetchCategories = async () => {
-    const { data, error } = await supabase.from("categories").select("id,name").order("name");
+    if (!companyId) {
+      setCategories([]);
+      return;
+    }
+
+    const { data, error } = await categoriesTbl
+      .select("id,name,company_id")
+      .match({ company_id: companyId })
+      .order("name");
+
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
       setCategories([]);
       return;
     }
+
     setCategories((data ?? []) as CategoryRow[]);
   };
 
@@ -188,11 +214,9 @@ export default function Inventory() {
       return;
     }
 
-    const { data, error } = await supabase
-      .from("branches")
+    const { data, error } = await branchesTbl
       .select("id,name,company_id,is_active")
-      .eq("company_id", companyId)
-      .eq("is_active", true)
+      .match({ company_id: companyId, is_active: true })
       .order("name");
 
     if (error) {
@@ -238,24 +262,35 @@ export default function Inventory() {
 
   const handleSaveProduct = async () => {
     if (saving) return;
-    setSaving(true);
 
+    if (!companyId) {
+      toast({
+        title: "Company missing",
+        description: "Your profile has no company. Complete setup first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSaving(true);
     try {
       const name = productForm.name.trim();
       if (!name) {
-        toast({ title: "Error", description: "Product name is required", variant: "destructive" });
+        toast({
+          title: "Error",
+          description: "Product name is required",
+          variant: "destructive",
+        });
         return;
       }
 
       const forcedBranchId = activeBranchId ?? null;
       const formBranchId = productForm.branch_id || null;
 
-      // ✅ FIX: when admin is viewing "All branches", allow branch change even on edit
       const branch_id =
         forcedBranchId ??
         (formBranchId ?? (editingProduct ? editingProduct.branch_id ?? null : null));
 
-      // if admin is on all branches and creating a product, require a branch
       if (isAdmin && !activeBranchId && !editingProduct && !branch_id) {
         toast({
           title: "Branch required",
@@ -265,7 +300,8 @@ export default function Inventory() {
         return;
       }
 
-      const productData: any = {
+      const productData = {
+        company_id: companyId,
         name,
         sku: productForm.sku.trim() || null,
         category_id: productForm.category_id || null,
@@ -278,9 +314,11 @@ export default function Inventory() {
       let error: any;
 
       if (editingProduct) {
-        ({ error } = await supabase.from("products").update(productData).eq("id", editingProduct.id));
+        ({ error } = await productsTbl
+          .update(productData)
+          .match({ id: editingProduct.id, company_id: companyId }));
       } else {
-        ({ error } = await supabase.from("products").insert(productData));
+        ({ error } = await productsTbl.insert(productData));
       }
 
       if (error) {
@@ -288,7 +326,10 @@ export default function Inventory() {
         return;
       }
 
-      toast({ title: "Success", description: `Product ${editingProduct ? "updated" : "created"}` });
+      toast({
+        title: "Success",
+        description: `Product ${editingProduct ? "updated" : "created"}`,
+      });
 
       setProductDialogOpen(false);
       resetProductForm();
@@ -299,15 +340,19 @@ export default function Inventory() {
   };
 
   const handleDeleteProduct = async (id: string) => {
-    // ✅ UI guard (RLS should still enforce server-side)
     if (!isAdmin) {
-      toast({ title: "Not allowed", description: "Only admins can delete products.", variant: "destructive" });
+      toast({
+        title: "Not allowed",
+        description: "Only admins can delete products.",
+        variant: "destructive",
+      });
       return;
     }
+    if (!companyId) return;
 
     if (!confirm("Are you sure you want to delete this product?")) return;
 
-    const { error } = await supabase.from("products").delete().eq("id", id);
+    const { error } = await productsTbl.delete().match({ id, company_id: companyId });
 
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -319,15 +364,13 @@ export default function Inventory() {
   };
 
   /**
-   * ✅ FINAL: Receive Stock
-   * Since you already have a DB trigger:
-   * - insert into stock_receipts
-   * - trigger updates products.quantity_in_stock automatically
-   * So DO NOT update products manually here (prevents double increment)
+   * ✅ Receive Stock:
+   * Insert stock_receipts, DB trigger updates product stock.
    */
   const handleReceiveStock = async () => {
     if (!user || !selectedProduct) return;
     if (saving) return;
+    if (!companyId) return;
 
     const quantity = Number.parseInt(receiptForm.quantity, 10);
     if (!quantity || quantity <= 0) {
@@ -348,7 +391,10 @@ export default function Inventory() {
 
     setSaving(true);
     try {
+      // NOTE: keep company_id only if stock_receipts table has it.
+      // If your stock_receipts table DOES NOT have company_id, remove it here.
       const receiptPayload: any = {
+        company_id: companyId,
         branch_id: branchIdToUse,
         product_id: selectedProduct.id,
         quantity,
@@ -357,7 +403,7 @@ export default function Inventory() {
         received_by: user.id,
       };
 
-      const { error: receiptErr } = await supabase.from("stock_receipts").insert(receiptPayload);
+      const { error: receiptErr } = await stockReceiptsTbl.insert(receiptPayload);
 
       if (receiptErr) {
         toast({ title: "Error", description: receiptErr.message, variant: "destructive" });
@@ -373,7 +419,6 @@ export default function Inventory() {
       setSelectedProduct(null);
       setReceiptForm({ quantity: "", supplier_name: "", notes: "" });
 
-      // Trigger will update products; refresh to reflect
       fetchProducts();
     } finally {
       setSaving(false);
@@ -382,13 +427,31 @@ export default function Inventory() {
 
   const handleSaveCategory = async () => {
     if (saving) return;
+
+    if (!companyId) {
+      toast({
+        title: "Company missing",
+        description: "Your profile has no company. Complete setup first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const name = categoryName.trim();
+    if (!name) {
+      toast({ title: "Error", description: "Category name is required", variant: "destructive" });
+      return;
+    }
+
     setSaving(true);
-
     try {
-      const name = categoryName.trim();
-      if (!name) return;
+      const payload = {
+        name,
+        description: categoryDescription.trim() || null,
+        company_id: companyId,
+      };
 
-      const { error } = await supabase.from("categories").insert({ name });
+      const { error } = await categoriesTbl.insert(payload);
 
       if (error) {
         toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -398,6 +461,7 @@ export default function Inventory() {
       toast({ title: "Category Created" });
       setCategoryDialogOpen(false);
       setCategoryName("");
+      setCategoryDescription("");
       fetchCategories();
     } finally {
       setSaving(false);
@@ -761,13 +825,24 @@ export default function Inventory() {
             <DialogTitle className="text-white">Add Category</DialogTitle>
           </DialogHeader>
 
-          <div>
-            <Label className="text-slate-200">Category Name</Label>
-            <Input
-              value={categoryName}
-              onChange={(e) => setCategoryName(e.target.value)}
-              className="bg-slate-700 border-slate-600 text-white"
-            />
+          <div className="space-y-3">
+            <div>
+              <Label className="text-slate-200">Category Name</Label>
+              <Input
+                value={categoryName}
+                onChange={(e) => setCategoryName(e.target.value)}
+                className="bg-slate-700 border-slate-600 text-white"
+              />
+            </div>
+
+            <div>
+              <Label className="text-slate-200">Description (optional)</Label>
+              <Input
+                value={categoryDescription}
+                onChange={(e) => setCategoryDescription(e.target.value)}
+                className="bg-slate-700 border-slate-600 text-white"
+              />
+            </div>
           </div>
 
           <DialogFooter>

@@ -42,15 +42,13 @@ interface AuthContextType {
   profile: Profile | null;
   roles: AppRole[];
 
-  // ✅ company branding (best practice)
   company: CompanyMini | null;
-  companyName: string | null; // backward compatibility
-  companyLogoUrl: string | null; // derived display url (public or signed)
+  companyName: string | null;
+  companyLogoUrl: string | null;
 
   branchId: string | null;
   branchName: string | null;
 
-  // ✅ admin active branch context
   activeBranchId: string | null;
   activeBranchName: string | null;
   branches: BranchMini[];
@@ -70,6 +68,12 @@ interface AuthContextType {
     password: string,
     fullName: string
   ) => Promise<{ error: Error | null; needsCompanySetup?: boolean }>;
+
+  bootstrapFirstAdmin: (args: {
+    companyName: string;
+    fullName: string;
+    branchName?: string;
+  }) => Promise<{ error: Error | null; ok?: boolean }>;
 
   signOut: () => Promise<void>;
 
@@ -118,6 +122,8 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const ADMIN_ACTIVE_BRANCH_KEY = "admin_active_branch_id";
+// ✅ must match Sidebar / BranchSwitcher
+const ADMIN_ACTIVE_BRANCH_NAME_KEY = "admin_active_branch_name_v1";
 
 const LOADING_WATCHDOG_MS = 8000;
 
@@ -191,12 +197,6 @@ function getSupabaseUrlFromEnv(): string | null {
   );
 }
 
-/**
- * ✅ NEW:
- * Always prefer a stable public site URL for auth emails.
- * - On localhost, `window.location.origin` = http://localhost:8081 (bad for opening on phone)
- * - On Vercel, use VITE_SITE_URL = https://pos-warehouse.vercel.app
- */
 function getSiteUrl(): string {
   const env =
     (import.meta.env.VITE_SITE_URL as string | undefined) ||
@@ -207,8 +207,13 @@ function getSiteUrl(): string {
   const v = String(env || "").trim().replace(/\/+$/, "");
   if (v && /^https?:\/\//i.test(v)) return v;
 
-  // fallback: current origin (works for pure web testing on same device)
   return window.location.origin;
+}
+
+async function rpc<T = any>(fn: string, args?: Record<string, any>): Promise<T> {
+  const { data, error } = await (supabase as any).rpc(fn, args ?? {});
+  if (error) throw error;
+  return data as T;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -221,23 +226,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const [branchNameState, setBranchNameState] = useState<string | null>(null);
 
-  // ✅ company data in one place
   const [company, setCompany] = useState<CompanyMini | null>(null);
   const [companyLogoUrl, setCompanyLogoUrl] = useState<string | null>(null);
 
-  // ✅ keep companyName for existing components
   const companyName = company?.name ?? null;
 
-  // ✅ branches (for admin switcher + label)
   const [branchesState, setBranchesState] = useState<BranchMini[]>([]);
   const [activeBranchNameState, setActiveBranchNameState] = useState<string | null>(null);
 
   const fetchSeq = useRef(0);
   const mountedRef = useRef(true);
   const lastFetchedUserIdRef = useRef<string | null>(null);
-
-  // ✅ NEW: stable company_id + remember last loaded company for branches
-  const companyIdFromProfile = (profile as any)?.company_id ?? null;
 
   const watchdogRef = useRef<number | null>(null);
   const kickWatchdog = () => {
@@ -269,6 +268,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const branchId = (profile as any)?.branch_id ?? null;
   const branchName = branchNameState;
 
+  const companyIdFromProfile = (profile as any)?.company_id ?? null;
+
   const [activeBranchIdState, setActiveBranchIdState] = useState<string | null>(null);
   const safeSetActiveBranch = (v: string | null) =>
     mountedRef.current && setActiveBranchIdState(v);
@@ -283,21 +284,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isAttendanceManager = (profile as any)?.is_attendance_manager || false;
   const isReturnsHandler = (profile as any)?.is_returns_handler || false;
 
+  // ✅ When admin changes "viewing branch", persist to DB so RLS & SQL context matches UI.
+  const persistActiveBranchToDb = async (newBranchId: string | null) => {
+    if (!user?.id) return;
+    if (!isAdmin) return;
+
+    try {
+      await supabase
+        .from("profiles")
+        .update({ active_branch_id: newBranchId } as any)
+        .eq("user_id", user.id);
+    } catch (e) {
+      console.warn("[useAuth] persistActiveBranchToDb failed:", e);
+    }
+  };
+
   const setActiveBranchId = (newBranchId: string | null) => {
     if (!isAdmin) return;
 
     safeSetActiveBranch(newBranchId);
 
-    if (!newBranchId) safeSetActiveBranchName(null);
-    else {
+    // ✅ also persist a readable name to localStorage (prevents pages showing the UUID)
+    let nameToCache: string | null = null;
+
+    if (!newBranchId) {
+      safeSetActiveBranchName(null);
+    } else {
       const maybe = branchesState.find((b) => b.id === newBranchId)?.name ?? null;
-      if (maybe) safeSetActiveBranchName(maybe);
+      if (maybe) {
+        safeSetActiveBranchName(maybe);
+        nameToCache = maybe;
+      } else {
+        // keep previous value until fetchActiveBranchName runs
+        nameToCache = activeBranchNameState ?? null;
+      }
     }
 
-    if (newBranchId) localStorage.setItem(ADMIN_ACTIVE_BRANCH_KEY, newBranchId);
-    else localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+    try {
+      if (newBranchId) localStorage.setItem(ADMIN_ACTIVE_BRANCH_KEY, newBranchId);
+      else localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+
+      if (newBranchId && nameToCache) localStorage.setItem(ADMIN_ACTIVE_BRANCH_NAME_KEY, nameToCache);
+      else localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+    } catch {}
+
+    // ✅ critical: keep DB in sync with UI selection
+    persistActiveBranchToDb(newBranchId).catch(() => {});
   };
 
+  // ✅ one source of truth for "scoped branch"
   const activeBranchId = useMemo(() => {
     if (isAdmin) return activeBranchIdState;
     return branchId;
@@ -311,11 +346,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else if (p?.is_admin === true) safeSetRoles(["admin"]);
     else safeSetRoles([]);
 
-    const saved = localStorage.getItem(ADMIN_ACTIVE_BRANCH_KEY);
     const adminNow = (prof?.role && prof.role === "admin") || p?.is_admin === true;
 
-    if (adminNow) safeSetActiveBranch(saved || null);
-    else safeSetActiveBranch(null);
+    // ✅ prefer DB active_branch_id; localStorage only fallback
+    const fromDb = (p as any)?.active_branch_id ?? null;
+    const saved = (() => {
+      try {
+        return localStorage.getItem(ADMIN_ACTIVE_BRANCH_KEY);
+      } catch {
+        return null;
+      }
+    })();
+
+    // ✅ if we only have the id (or it was restored), use cached branch name to avoid showing UUID in UI
+    const savedName = (() => {
+      try {
+        return (localStorage.getItem(ADMIN_ACTIVE_BRANCH_NAME_KEY) ?? "").trim() || null;
+      } catch {
+        return null;
+      }
+    })();
+
+    if (adminNow) {
+      const chosen = fromDb || saved || null;
+      safeSetActiveBranch(chosen);
+      if (chosen) safeSetActiveBranchName(savedName); // later, fetchActiveBranchName will correct it
+      else safeSetActiveBranchName(null);
+    } else {
+      safeSetActiveBranch(null);
+      safeSetActiveBranchName(null);
+    }
   };
 
   // -----------------------
@@ -426,6 +486,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       is_admin: false as any,
       company_id: null as any,
       branch_id: null as any,
+      active_branch_id: null as any,
       avatar_url: null as any,
       staff_code: null as any,
       is_attendance_manager: false as any,
@@ -438,7 +499,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } as unknown as Profile;
   };
 
-  // ✅ staff branch name (their assigned branch)
   const fetchBranchName = async (bId: string | null) => {
     if (!bId) {
       safeSetBranchName(null);
@@ -460,10 +520,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ admin selected branch name (activeBranchId)
   const fetchActiveBranchName = async (bId: string | null) => {
     if (!bId) {
       safeSetActiveBranchName(null);
+      try {
+        localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+      } catch {}
       return;
     }
 
@@ -475,13 +537,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { data, error } = await withTimeout(queryPromise, 2500, "fetchActiveBranchName");
       if (error) throw error;
 
-      safeSetActiveBranchName((data as any)?.name ?? null);
+      const n = (data as any)?.name ?? null;
+      safeSetActiveBranchName(n);
+
+      try {
+        if (n) localStorage.setItem(ADMIN_ACTIVE_BRANCH_NAME_KEY, String(n));
+        else localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+      } catch {}
     } catch (e) {
       console.warn("[useAuth] active branch name fetch failed:", e);
     }
   };
 
-  // ✅ load branches for admin switcher
   const fetchBranches = async (companyId: string | null): Promise<BranchMini[]> => {
     if (!companyId) {
       safeSetBranches([]);
@@ -519,6 +586,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return await fetchBranches(companyIdFromProfile);
   };
 
+  // ✅ load branches for admin switcher
   useEffect(() => {
     if (!isAdmin) {
       safeSetBranches([]);
@@ -529,8 +597,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     fetchBranches(companyIdFromProfile).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, companyIdFromProfile]);
 
+  // ✅ keep activeBranchName updated
   useEffect(() => {
     if (!isAdmin) {
       safeSetActiveBranchName(branchNameState ?? null);
@@ -545,11 +615,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const found = branchesState.find((b) => b.id === activeBranchIdState)?.name ?? null;
     if (found) {
       safeSetActiveBranchName(found);
+      try {
+        localStorage.setItem(ADMIN_ACTIVE_BRANCH_NAME_KEY, String(found));
+      } catch {}
       return;
     }
 
     fetchActiveBranchName(activeBranchIdState).catch(() => {});
   }, [isAdmin, activeBranchIdState, branchesState, branchNameState]);
+
+  // ✅ HARDEN: if active branch not in this company, reset it (and DB)
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (!companyIdFromProfile) return;
+
+    if (!activeBranchIdState) return;
+
+    const ok = branchesState.some((b) => b.id === activeBranchIdState);
+    if (ok) return;
+
+    console.warn("[useAuth] activeBranchId not in company branches. Resetting.", {
+      activeBranchIdState,
+      companyIdFromProfile,
+    });
+
+    safeSetActiveBranch(null);
+    safeSetActiveBranchName(null);
+    try {
+      localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+      localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+    } catch {}
+
+    persistActiveBranchToDb(null).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, companyIdFromProfile, branchesState, activeBranchIdState]);
 
   // ✅ derive displayable company logo URL
   const resolveCompanyLogoUrl = async (userId: string, logoValue: string | null) => {
@@ -623,32 +722,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  /**
-   * ✅ IMPORTANT:
-   * This upsert MUST be allowed to insert a profile with company_id NULL for new users.
-   * If profiles.company_id is NOT NULL in DB, signup will fail with:
-   * "null value in column company_id violates not-null constraint"
-   */
   const ensureProfileRowExists = async (userId: string) => {
     try {
+      const checkPromise = Promise.resolve(
+        supabase.from("profiles").select("id, company_id").eq("user_id", userId).maybeSingle()
+      );
+
+      const { data: existing, error: checkErr } = await withTimeout(
+        checkPromise,
+        4000,
+        "ensureProfileRowExists(check)"
+      );
+
+      if (checkErr) throw checkErr;
+      if (existing?.id) return;
+
       const metaFullName =
         (user as any)?.user_metadata?.full_name ??
         (session as any)?.user?.user_metadata?.full_name ??
-        null;
+        (user as any)?.email ??
+        "User";
 
       const insertPromise = Promise.resolve(
-        supabase.from("profiles").upsert(
+        supabase.from("profiles").insert(
           {
             user_id: userId,
             full_name: metaFullName,
             company_id: null,
             branch_id: null,
-          } as any,
-          { onConflict: "user_id" }
+            active_branch_id: null,
+          } as any
         )
       );
 
-      const { error } = await withTimeout(insertPromise as any, 4000, "ensureProfileRowExists");
+      const res = await withTimeout(insertPromise as any, 4000, "ensureProfileRowExists(insert)");
+      const error = (res as any)?.error;
       if (error) throw error;
     } catch (e: any) {
       const msg = String(e?.message || "");
@@ -682,6 +790,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               is_admin,
               company_id,
               branch_id,
+              active_branch_id,
               avatar_url,
               staff_code,
               is_attendance_manager,
@@ -788,6 +897,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return null;
       }
 
+      // ✅ if company changed, clear stored admin branch
+      const prevCompany = (profile as any)?.company_id ?? null;
+      const nextCompany = (data as any)?.company_id ?? null;
+      if (prevCompany && nextCompany && prevCompany !== nextCompany) {
+        try {
+          localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+          localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
+        } catch {}
+      }
+
       applyProfileState(data);
       writeCachedProfile(userId, data);
 
@@ -880,6 +999,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         try {
           localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+          localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
         } catch {}
 
         safeSetLoading(false);
@@ -898,23 +1018,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (initialSession?.user) {
           const uid = initialSession.user.id;
 
-          if (lastFetchedUserIdRef.current === uid) {
-            safeSetLoading(false);
-            stopWatchdog();
-            return;
-          }
-
-          lastFetchedUserIdRef.current = uid;
-
           safeSetLoading(true);
           kickWatchdog();
-          await fetchUserData(uid);
+
+          try {
+            await fetchUserData(uid);
+          } catch (e) {
+            console.error("[useAuth] initial getSession hydrate failed:", e);
+          } finally {
+            safeSetLoading(false);
+            stopWatchdog();
+          }
         } else {
           safeSetLoading(false);
           stopWatchdog();
         }
-      } catch (err) {
-        console.error("[useAuth] getSession failed:", err);
+      } catch (e) {
+        console.error("[useAuth] getSession failed:", e);
         safeSetLoading(false);
         stopWatchdog();
       }
@@ -940,11 +1060,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null, needsCompanySetup };
   };
 
-  /**
-   * ✅ UPDATED:
-   * Use VITE_SITE_URL for emailRedirectTo so confirmation links always open on Vercel,
-   * even if signup was done on localhost.
-   */
   const signUp = async (email: string, password: string, fullName: string) => {
     const redirectTo = `${getSiteUrl()}/`;
 
@@ -959,11 +1074,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     if (error) return { error: error as Error };
 
-    // For email-confirm projects, session might be null until confirmed.
-    // Still return needsCompanySetup=true (setup happens after they confirm + login).
     if (!data.user?.id) return { error: null, needsCompanySetup: true };
 
-    // If Supabase instantly returns a session (email confirm off), hydrate.
     safeSetLoading(true);
     kickWatchdog();
     const p = await fetchUserData(data.user.id);
@@ -972,7 +1084,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null, needsCompanySetup };
   };
 
-  // ✅ Use this everywhere we call Edge Functions
+  const bootstrapFirstAdmin: AuthContextType["bootstrapFirstAdmin"] = async (args) => {
+    try {
+      const companyName = String(args.companyName || "").trim();
+      const fullName = String(args.fullName || "").trim();
+      const branchName = String(args.branchName || "Main Branch").trim();
+
+      if (!companyName) return { error: new Error("Missing company name") };
+      if (!fullName) return { error: new Error("Missing full name") };
+
+      await withTimeout(
+        rpc("bootstrap_first_admin", {
+          company_name: companyName,
+          full_name: fullName,
+          branch_name: branchName,
+        }),
+        12_000,
+        "bootstrap_first_admin"
+      );
+
+      await refreshProfile();
+      await refreshCompany();
+      await refreshBranches();
+
+      return { error: null, ok: true };
+    } catch (e: any) {
+      return { error: e instanceof Error ? e : new Error(String(e)) };
+    }
+  };
+
   const getFreshAccessToken = async () => {
     const { data: s1, error: e1 } = await supabase.auth.getSession();
     if (e1) throw e1;
@@ -1098,10 +1238,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const repairMissingCompanyId: AuthContextType["repairMissingCompanyId"] = async () => {
     try {
-      const payload = await callEdge<{ ok: boolean; repaired?: number }>(
-        "repair-missing-company-id",
-        {}
-      );
+      const payload = await callEdge<{ ok: boolean; repaired?: number }>("repair-missing-company-id", {});
       return { error: null, repaired: Number((payload as any)?.repaired ?? 0) };
     } catch (e: any) {
       return { error: e instanceof Error ? e : new Error(String(e)) };
@@ -1143,6 +1280,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
+      localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
     } catch {}
 
     safeSetBranches([]);
@@ -1181,6 +1319,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         signIn,
         signUp,
+        bootstrapFirstAdmin,
         signOut,
 
         hasRole,

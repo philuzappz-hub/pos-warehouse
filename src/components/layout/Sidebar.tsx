@@ -44,10 +44,16 @@ export default function Sidebar() {
     isReturnsHandler,
     branchName,
     activeBranchId,
-    activeBranchName, // ✅ NEW
+    activeBranchName,
     companyName,
   } = useAuth() as any;
 
+  /**
+   * ✅ NAV VISIBILITY (our logic)
+   * - Admin visibility is already derived from roles[] (admin is in roles)
+   * - Attendance Managers also see Attendance nav
+   * - Returns handlers see Returns nav
+   */
   const filteredNav = filterNavigation(navigation, {
     roles: roles as any,
     isAttendanceManager: !!isAttendanceManager,
@@ -120,15 +126,19 @@ export default function Sidebar() {
       const logoPathOrUrl = String(data?.logo_url ?? "").trim();
       if (!logoPathOrUrl) {
         setCompanyLogoUrl("");
+        setLogoFailed(false);
         return;
       }
 
+      // Public URL already stored
       if (isHttpUrl(logoPathOrUrl)) {
         setCompanyLogoUrl(logoPathOrUrl);
+        setLogoFailed(false);
         refreshTimerRef.current = window.setTimeout(fetchCompanyLogo, 55 * 60 * 1000);
         return;
       }
 
+      // Private bucket path => signed url
       const { data: signed, error: signErr } = await supabase.storage
         .from(COMPANY_LOGO_BUCKET)
         .createSignedUrl(logoPathOrUrl, SIGNED_URL_TTL);
@@ -136,13 +146,18 @@ export default function Sidebar() {
       if (signErr) throw signErr;
 
       const signedUrl = signed?.signedUrl || "";
-      setCompanyLogoUrl(signedUrl);
+      if (!signedUrl) throw new Error("No signed URL returned");
 
+      setCompanyLogoUrl(signedUrl);
+      setLogoFailed(false);
+
+      // Refresh before expiry (TTL - 5 mins)
       const refreshMs = Math.max((SIGNED_URL_TTL - 300) * 1000, 5 * 60 * 1000);
       refreshTimerRef.current = window.setTimeout(fetchCompanyLogo, refreshMs);
     } catch {
+      // ✅ if anything fails, fall back to initials
       setCompanyLogoUrl("");
-      setLogoFailed(false);
+      setLogoFailed(true);
     } finally {
       setLogoLoading(false);
     }

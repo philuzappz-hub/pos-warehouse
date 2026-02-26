@@ -23,22 +23,42 @@ const loginSchema = z.object({
 });
 
 const signupSchema = loginSchema.extend({
+  companyName: z.string().min(2, "Company name must be at least 2 characters"),
   fullName: z.string().min(2, "Name must be at least 2 characters"),
 });
 
+/**
+ * Always prefer a stable public site URL for auth emails.
+ * Put this in .env for Vercel:
+ *   VITE_SITE_URL=https://your-app.vercel.app
+ */
+function getSiteUrl(): string {
+  const env =
+    (import.meta.env.VITE_SITE_URL as string | undefined) ||
+    (import.meta.env.VITE_PUBLIC_SITE_URL as string | undefined) ||
+    (import.meta.env.VITE_APP_URL as string | undefined) ||
+    "";
+
+  const v = String(env || "").trim().replace(/\/+$/, "");
+  if (v && /^https?:\/\//i.test(v)) return v;
+
+  return window.location.origin;
+}
+
 export default function Auth() {
   const [isLoading, setIsLoading] = useState(false);
-
   const [tab, setTab] = useState<"login" | "signup">("login");
 
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
 
+  const [signupCompanyName, setSignupCompanyName] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
   const [signupName, setSignupName] = useState("");
 
-  const { signIn, signUp } = useAuth();
+  const { signIn } = useAuth();
+
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -49,6 +69,7 @@ export default function Auth() {
       email: loginEmail,
       password: loginPassword,
     });
+
     if (!result.success) {
       toast({
         title: "Validation Error",
@@ -59,27 +80,29 @@ export default function Auth() {
     }
 
     setIsLoading(true);
-    const { error, needsCompanySetup } = await signIn(loginEmail, loginPassword);
-    setIsLoading(false);
+    try {
+      const { error, needsCompanySetup } = await signIn(loginEmail, loginPassword);
 
-    if (error) {
-      toast({
-        title: "Login Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-      return;
+      if (error) {
+        toast({
+          title: "Login Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+        return;
+      }
+
+      toast({ title: "Welcome back!" });
+
+      if (needsCompanySetup) {
+        navigate("/setup-company", { replace: true });
+        return;
+      }
+
+      navigate("/", { replace: true });
+    } finally {
+      setIsLoading(false);
     }
-
-    toast({ title: "Welcome back!" });
-
-    if (needsCompanySetup) {
-      navigate("/setup-company", { replace: true });
-      return;
-    }
-
-    // Go to gatekeeper
-    navigate("/", { replace: true });
   };
 
   const handleSignup = async (e: React.FormEvent) => {
@@ -89,6 +112,7 @@ export default function Auth() {
       email: signupEmail,
       password: signupPassword,
       fullName: signupName,
+      companyName: signupCompanyName,
     });
 
     if (!result.success) {
@@ -101,48 +125,78 @@ export default function Auth() {
     }
 
     setIsLoading(true);
-    const { error } = await signUp(signupEmail, signupPassword, signupName);
-    setIsLoading(false);
+    try {
+      // 1️⃣ Create auth user
+      const redirectTo = `${getSiteUrl()}/`;
 
-    if (error) {
-      if (error.message.toLowerCase().includes("already registered")) {
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email: signupEmail,
+        password: signupPassword,
+        options: {
+          emailRedirectTo: redirectTo,
+          data: { full_name: signupName },
+        },
+      });
+
+      if (signUpError) {
+        const msg = signUpError.message || "Signup failed";
+        if (msg.toLowerCase().includes("already registered")) {
+          toast({
+            title: "Account Exists",
+            description: "This email is already registered. Please login.",
+            variant: "destructive",
+          });
+          setTab("login");
+        } else {
+          toast({
+            title: "Signup Failed",
+            description: msg,
+            variant: "destructive",
+          });
+        }
+        return;
+      }
+
+      // If email confirmations are ON, a session may not exist yet
+      const user = signUpData?.user;
+      const session = signUpData?.session;
+
+      if (!user || !session) {
         toast({
-          title: "Account Exists",
-          description: "This email is already registered. Please login.",
-          variant: "destructive",
+          title: "Account Created",
+          description:
+            "Please check your email to confirm your account, then login to finish setup.",
         });
         setTab("login");
-      } else {
+        return;
+      }
+
+      // 2️⃣ Bootstrap first admin + company
+      // NOTE: TypeScript error happens because Database types don't know this RPC yet.
+      // Runtime is fine. We safely bypass typing using (supabase as any).
+      const { error: bootstrapError } = await (supabase as any).rpc("bootstrap_first_admin", {
+        company_name: signupCompanyName,
+        full_name: signupName,
+      });
+
+      if (bootstrapError) {
         toast({
-          title: "Signup Failed",
-          description: error.message,
+          title: "Setup Failed",
+          description: bootstrapError.message,
           variant: "destructive",
         });
+        return;
       }
-      return;
-    }
 
-    // ✅ Check if signup created a session (depends on email confirmation setting)
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
-    if (!session?.user) {
       toast({
         title: "Account Created",
-        description:
-          "Please check your email to confirm your account, then login to continue setup.",
+        description: "Admin account created. Welcome!",
       });
-      setTab("login");
-      return;
+
+      navigate("/", { replace: true });
+    } finally {
+      setIsLoading(false);
     }
-
-    toast({
-      title: "Account Created",
-      description: "Next: set up your company details.",
-    });
-
-    navigate("/setup-company", { replace: true });
   };
 
   return (
@@ -153,16 +207,18 @@ export default function Auth() {
             <Building2 className="h-8 w-8 text-primary" />
           </div>
           <CardTitle className="text-2xl text-white">Building Materials</CardTitle>
-          <CardDescription className="text-slate-400">
-            Management System
-          </CardDescription>
+          <CardDescription className="text-slate-400">Management System</CardDescription>
         </CardHeader>
 
         <CardContent>
           <Tabs value={tab} onValueChange={(v) => setTab(v as any)} className="w-full">
             <TabsList className="grid w-full grid-cols-2 bg-slate-700">
-              <TabsTrigger value="login">Login</TabsTrigger>
-              <TabsTrigger value="signup">Sign Up</TabsTrigger>
+              <TabsTrigger value="login" disabled={isLoading}>
+                Login
+              </TabsTrigger>
+              <TabsTrigger value="signup" disabled={isLoading}>
+                Sign Up
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="login">
@@ -179,6 +235,7 @@ export default function Auth() {
                     onChange={(e) => setLoginEmail(e.target.value)}
                     className="bg-slate-700 border-slate-600 text-white"
                     required
+                    disabled={isLoading}
                   />
                 </div>
 
@@ -194,13 +251,12 @@ export default function Auth() {
                     onChange={(e) => setLoginPassword(e.target.value)}
                     className="bg-slate-700 border-slate-600 text-white"
                     required
+                    disabled={isLoading}
                   />
                 </div>
 
                 <Button type="submit" className="w-full" disabled={isLoading}>
-                  {isLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  ) : null}
+                  {isLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
                   Login
                 </Button>
               </form>
@@ -208,6 +264,22 @@ export default function Auth() {
 
             <TabsContent value="signup">
               <form onSubmit={handleSignup} className="space-y-4 mt-4">
+                <div className="space-y-2">
+                  <Label htmlFor="signup-company" className="text-slate-200">
+                    Company Name
+                  </Label>
+                  <Input
+                    id="signup-company"
+                    type="text"
+                    placeholder="Wemah Enterprise"
+                    value={signupCompanyName}
+                    onChange={(e) => setSignupCompanyName(e.target.value)}
+                    className="bg-slate-700 border-slate-600 text-white"
+                    required
+                    disabled={isLoading}
+                  />
+                </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="signup-name" className="text-slate-200">
                     Full Name
@@ -220,6 +292,7 @@ export default function Auth() {
                     onChange={(e) => setSignupName(e.target.value)}
                     className="bg-slate-700 border-slate-600 text-white"
                     required
+                    disabled={isLoading}
                   />
                 </div>
 
@@ -235,6 +308,7 @@ export default function Auth() {
                     onChange={(e) => setSignupEmail(e.target.value)}
                     className="bg-slate-700 border-slate-600 text-white"
                     required
+                    disabled={isLoading}
                   />
                 </div>
 
@@ -250,13 +324,12 @@ export default function Auth() {
                     onChange={(e) => setSignupPassword(e.target.value)}
                     className="bg-slate-700 border-slate-600 text-white"
                     required
+                    disabled={isLoading}
                   />
                 </div>
 
                 <Button type="submit" className="w-full" disabled={isLoading}>
-                  {isLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  ) : null}
+                  {isLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
                   Create Account
                 </Button>
               </form>

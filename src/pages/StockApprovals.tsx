@@ -264,7 +264,8 @@ export default function StockApprovals() {
   const { toast } = useToast();
 
   // ✅ use global company + logo url (signed/public) from AuthProvider
-  const { user, isAdmin, activeBranchId, profile, company, companyLogoUrl } = useAuth();
+ const { user, isAdmin, activeBranchId, activeBranchName, profile, company, companyLogoUrl } =
+  useAuth() as any;
 
   const sb = supabase as any;
 
@@ -1024,8 +1025,8 @@ export default function StockApprovals() {
               <>
                 Viewing:{" "}
                 <b className="text-white">
-                  {activeBranchId ? getBranchLabel(activeBranchId) : "All branches"}
-                </b>
+  {activeBranchId ? (activeBranchName || getBranchLabel(activeBranchId)) : "All branches"}
+</b>
               </>
             ) : (
               "Review warehouse receiving before approving stock updates"

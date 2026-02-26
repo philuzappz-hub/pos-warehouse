@@ -60,7 +60,7 @@ export default function Users() {
     updateEmployeeRoleBranch,
     setEmployeeFlag,
     profile: me,
-    activeBranchId, // ✅ IMPORTANT: selected branch from admin selector
+    activeBranchId, // ✅ selected branch from admin selector
   } = useAuth() as any;
 
   const [users, setUsers] = useState<UserRow[]>([]);
@@ -84,6 +84,9 @@ export default function Users() {
 
   // prevent double submit
   const addInFlightRef = useRef(false);
+
+  // ✅ small optimistic UI state for toggles
+  const [pendingToggle, setPendingToggle] = useState<Record<string, boolean>>({});
 
   const [newEmployee, setNewEmployee] = useState({
     email: "",
@@ -185,7 +188,7 @@ export default function Users() {
         });
       }
 
-      // 2) load branches + users (users will auto-filter by activeBranchId)
+      // 2) load branches + users (users auto-filter by activeBranchId)
       await Promise.all([fetchBranches(), fetchUsers()]);
       setLoading(false);
     })();
@@ -225,25 +228,24 @@ export default function Users() {
     }
 
     const baseSelect = `
-      id,
-      user_id,
-      full_name,
-      phone,
-      role,
-      branch_id,
-      staff_code,
-      avatar_url,
-      is_attendance_manager,
-      is_returns_handler,
-      created_at,
-      updated_at,
-      company_id,
-      deleted_at,
-      deleted_by,
-      deleted_reason,
-      branch:branches(name)
-    `;
-
+  id,
+  user_id,
+  full_name,
+  phone,
+  role,
+  branch_id,
+  staff_code,
+  avatar_url,
+  is_attendance_manager,
+  is_returns_handler,
+  created_at,
+  updated_at,
+  company_id,
+  deleted_at,
+  deleted_by,
+  deleted_reason,
+  branch:branches!profiles_branch_id_fkey(name)
+`;
     try {
       let q = supabase
         .from("profiles")
@@ -328,12 +330,50 @@ export default function Users() {
     await fetchUsers();
   };
 
+  /**
+   * ✅ Permission toggle rules (our new logic):
+   * - Admin must NOT be assigned attendance manager.
+   * - Attendance manager must have a branch_id (otherwise they won't see staff list / RLS issues).
+   */
   const togglePermission = async (
-    userId: string,
+    user: UserRow,
     field: "is_attendance_manager" | "is_returns_handler",
     currentValue: boolean
   ) => {
-    const { error } = await setEmployeeFlag(String(userId), field, !currentValue);
+    const isAdminRow = String(user.role) === "admin";
+    const hasBranch = !!user.branch_id;
+
+    if (field === "is_attendance_manager") {
+      if (isAdminRow) {
+        toast({
+          title: "Blocked",
+          description: "Admins cannot be Attendance Managers.",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (!hasBranch) {
+        toast({
+          title: "Assign branch first",
+          description: "Attendance Managers must be assigned to a branch.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    const next = !currentValue;
+
+    // optimistic UI
+    setPendingToggle((p) => ({ ...p, [String(user.user_id) + ":" + field]: true }));
+
+    const { error } = await setEmployeeFlag(String(user.user_id), field, next);
+
+    setPendingToggle((p) => {
+      const cp = { ...p };
+      delete cp[String(user.user_id) + ":" + field];
+      return cp;
+    });
 
     if (error) {
       toast({
@@ -534,7 +574,8 @@ export default function Users() {
             Assign roles & branches (secure via Edge Functions)
           </p>
           <p className="text-slate-500 text-sm">
-            Viewing: <span className="text-slate-200 font-semibold">{activeBranchName}</span>
+            Viewing:{" "}
+            <span className="text-slate-200 font-semibold">{activeBranchName}</span>
           </p>
         </div>
 
@@ -574,74 +615,112 @@ export default function Users() {
             </TableHeader>
 
             <TableBody>
-              {users.map((user) => (
-                <TableRow key={String(user.id)} className="border-slate-700">
-                  <TableCell className="text-white font-medium">{user.full_name}</TableCell>
+              {users.map((user) => {
+                const isAdminRow = String(user.role) === "admin";
+                const hasBranch = !!user.branch_id;
 
-                  <TableCell className="text-slate-300">{user.phone || "-"}</TableCell>
+                const attendanceKey = String(user.user_id) + ":is_attendance_manager";
+                const returnsKey = String(user.user_id) + ":is_returns_handler";
 
-                  <TableCell className="text-slate-300">{renderBranchName(user)}</TableCell>
+                const attendanceBusy = !!pendingToggle[attendanceKey];
+                const returnsBusy = !!pendingToggle[returnsKey];
 
-                  <TableCell>
-                    {user.role ? (
-                      <Badge className={`${getRoleColor(user.role as AppRole)} capitalize`}>
-                        {user.role}
-                      </Badge>
-                    ) : (
-                      <span className="text-slate-500 text-sm">No role</span>
-                    )}
-                  </TableCell>
+                const disableAttendanceToggle =
+                  attendanceBusy || isAdminRow || !hasBranch;
 
-                  <TableCell>
-                    <div className="flex flex-col gap-2">
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          checked={Boolean(user.is_attendance_manager)}
-                          onCheckedChange={() =>
-                            togglePermission(
-                              String(user.user_id),
-                              "is_attendance_manager",
-                              Boolean(user.is_attendance_manager)
-                            )
-                          }
-                        />
-                        <span className="text-xs text-slate-400">Attendance Manager</span>
+                return (
+                  <TableRow key={String(user.id)} className="border-slate-700">
+                    <TableCell className="text-white font-medium">
+                      {user.full_name}
+                    </TableCell>
+
+                    <TableCell className="text-slate-300">{user.phone || "-"}</TableCell>
+
+                    <TableCell className="text-slate-300">{renderBranchName(user)}</TableCell>
+
+                    <TableCell>
+                      {user.role ? (
+                        <Badge className={`${getRoleColor(user.role as AppRole)} capitalize`}>
+                          {user.role}
+                        </Badge>
+                      ) : (
+                        <span className="text-slate-500 text-sm">No role</span>
+                      )}
+                    </TableCell>
+
+                    <TableCell>
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center gap-2">
+                          <Switch
+                            checked={Boolean(user.is_attendance_manager)}
+                            disabled={disableAttendanceToggle}
+                            onCheckedChange={() =>
+                              togglePermission(
+                                user,
+                                "is_attendance_manager",
+                                Boolean(user.is_attendance_manager)
+                              )
+                            }
+                          />
+                          <span className="text-xs text-slate-400">Attendance Manager</span>
+
+                          {attendanceBusy && (
+                            <span className="text-[11px] text-slate-500">Saving…</span>
+                          )}
+                        </div>
+
+                        {/* ✅ hint messages for our rules */}
+                        {isAdminRow && (
+                          <div className="text-[11px] text-slate-500">
+                            Admins cannot be Attendance Managers.
+                          </div>
+                        )}
+                        {!hasBranch && !isAdminRow && (
+                          <div className="text-[11px] text-slate-500">
+                            Assign a branch to enable attendance access.
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-2">
+                          <Switch
+                            checked={Boolean(user.is_returns_handler)}
+                            disabled={returnsBusy}
+                            onCheckedChange={() =>
+                              togglePermission(
+                                user,
+                                "is_returns_handler",
+                                Boolean(user.is_returns_handler)
+                              )
+                            }
+                          />
+                          <span className="text-xs text-slate-400">Returns Handler</span>
+                          {returnsBusy && (
+                            <span className="text-[11px] text-slate-500">Saving…</span>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          checked={Boolean(user.is_returns_handler)}
-                          onCheckedChange={() =>
-                            togglePermission(
-                              String(user.user_id),
-                              "is_returns_handler",
-                              Boolean(user.is_returns_handler)
-                            )
-                          }
-                        />
-                        <span className="text-xs text-slate-400">Returns Handler</span>
+                    </TableCell>
+
+                    <TableCell className="text-slate-300">
+                      {user.created_at ? new Date(String(user.created_at)).toLocaleDateString() : "-"}
+                    </TableCell>
+
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" onClick={() => openEditDialog(user)}>
+                          <Shield className="h-4 w-4 mr-2" />
+                          Edit Role/Branch
+                        </Button>
+
+                        <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(user)}>
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Delete
+                        </Button>
                       </div>
-                    </div>
-                  </TableCell>
-
-                  <TableCell className="text-slate-300">
-                    {user.created_at ? new Date(String(user.created_at)).toLocaleDateString() : "-"}
-                  </TableCell>
-
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-2">
-                      <Button size="sm" variant="outline" onClick={() => openEditDialog(user)}>
-                        <Shield className="h-4 w-4 mr-2" />
-                        Edit Role/Branch
-                      </Button>
-
-                      <Button size="sm" variant="destructive" onClick={() => openDeleteDialog(user)}>
-                        <Trash2 className="h-4 w-4 mr-2" />
-                        Delete
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
 
               {users.length === 0 && (
                 <TableRow>

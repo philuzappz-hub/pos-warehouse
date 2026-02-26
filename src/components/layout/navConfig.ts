@@ -27,8 +27,9 @@ export type NavItem = {
 };
 
 export const navigation: NavItem[] = [
-  { name: "Dashboard", href: "/", icon: LayoutDashboard, roles: ["cashier", "warehouse", "staff"] },
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: ["admin"] },
+  // ✅ Make "/" available to admin too (prevents nav gaps if app uses "/" as main landing)
+  { name: "Dashboard", href: "/", icon: LayoutDashboard, roles: ["admin", "cashier", "warehouse", "staff"] },
+  
 
   { name: "Point of Sale", href: "/pos", icon: ShoppingCart, roles: ["cashier"] },
   { name: "POS Coupons", href: "/pos/coupons", icon: FileText, roles: ["cashier"] },
@@ -38,7 +39,10 @@ export const navigation: NavItem[] = [
   { name: "My Receipts", href: "/warehouse/my-receipts", icon: ClipboardList, roles: ["warehouse"] },
 
   { name: "Stock Approvals", href: "/stock-approvals", icon: ShieldCheck, roles: ["admin"] },
+
+  // ✅ Admin sees Attendance + Attendance Manager sees Attendance
   { name: "Attendance", href: "/attendance", icon: Clock, roles: ["admin"], allowAttendanceManager: true },
+
   { name: "Inventory", href: "/inventory", icon: Package, roles: ["admin"] },
 
   { name: "Returns", href: "/returns", icon: RotateCcw, roles: ["cashier"], allowReturnsHandler: true },
@@ -46,7 +50,7 @@ export const navigation: NavItem[] = [
 
   { name: "Employees", href: "/users", icon: Users, roles: ["admin"] },
 
-  // ✅ Expenses
+  // ✅ Intentional: returns handler can see Expenses
   { name: "Expenses", href: "/expenses", icon: FileText, roles: ["admin", "cashier"], allowReturnsHandler: true },
 
   { name: "Reports", href: "/reports", icon: BarChart3, roles: ["admin"] },

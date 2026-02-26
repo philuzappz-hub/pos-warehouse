@@ -19,7 +19,6 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { Profile } from "@/types/database";
 import {
   AlertCircle,
   Calendar,
@@ -30,6 +29,25 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+/**
+ * ✅ Local type to avoid "Profile not exported" errors.
+ * Only include the fields we actually use in this page.
+ */
+type ProfileRow = {
+  id: string;
+  user_id: string;
+  full_name: string;
+  phone?: string | null;
+  role?: string | null;
+  company_id?: string | null;
+  branch_id?: string | null;
+  deleted_at?: string | null;
+
+  // optional permission toggles (if you store them)
+  is_attendance_manager?: boolean | null;
+  is_returns_handler?: boolean | null;
+};
+
 interface AttendanceRow {
   id: string;
   user_id: string;
@@ -39,7 +57,7 @@ interface AttendanceRow {
   branch_id: string | null;
 
   // join
-  profile?: Profile | null;
+  profile?: ProfileRow | null;
 }
 
 type BranchContact = {
@@ -135,14 +153,32 @@ export default function Attendance() {
     profile,
     activeBranchId,
     companyName,
-    activeBranchName, // if your useAuth provides it
-    companyLogoUrl, // ✅ signed/public logo URL from useAuth (for PDFs)
+    activeBranchName,
+    companyLogoUrl,
   } = useAuth() as any;
 
-  const canManage = isAdmin || isAttendanceManager;
+  /**
+   * ✅ Permissions:
+   * - Admin can VIEW the page (reports + exports + tables)
+   * - Admin CANNOT clock-in/out anyone
+   * - Attendance Manager can VIEW + clock-in/out for staff (scoped to their branch)
+   */
+  const canView = isAdmin || isAttendanceManager;
+  const canClock = !!isAttendanceManager && !isAdmin;
 
   const today = isoDate(new Date());
   const companyId = (profile as any)?.company_id ?? null;
+
+  /**
+   * ✅ Branch scope rules:
+   * - Admin: uses activeBranchId (can be null => all branches)
+   * - Non-admin (attendance manager): force scope to their own profile.branch_id
+   *   (ignores activeBranchId, because staff should not switch branches)
+   */
+  const scopeBranchId = useMemo(() => {
+    if (isAdmin) return activeBranchId ?? null;
+    return (profile as any)?.branch_id ?? null;
+  }, [isAdmin, activeBranchId, profile]);
 
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const now = new Date();
@@ -162,7 +198,7 @@ export default function Attendance() {
 
   const weekEnd = useMemo(() => addDays(weekStart, 6), [weekStart]);
 
-  const [employees, setEmployees] = useState<Profile[]>([]);
+  const [employees, setEmployees] = useState<ProfileRow[]>([]);
   const [todayAttendance, setTodayAttendance] = useState<AttendanceRow[]>([]);
   const [monthAttendance, setMonthAttendance] = useState<AttendanceRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -177,27 +213,29 @@ export default function Attendance() {
    * Fetch helpers (scoped)
    * ========================= */
 
-  const fetchEmployeesList = async (): Promise<Profile[]> => {
+  const fetchEmployeesList = async (): Promise<ProfileRow[]> => {
     if (!companyId) {
       setEmployees([]);
       return [];
     }
 
-    let q = supabase
+    // ✅ Avoid TS deep inference issues
+    let q = (supabase as any)
       .from("profiles")
       .select("*")
       .eq("company_id", companyId as any)
       .is("deleted_at", null)
       .order("full_name");
 
-    if (activeBranchId) {
-      q = q.eq("branch_id", activeBranchId as any);
+    // ✅ Staff must always be scoped to their branch; admin uses active selection
+    if (scopeBranchId) {
+      q = q.eq("branch_id", scopeBranchId as any);
     }
 
     const { data, error } = await q;
     if (error) throw error;
 
-    const list = (data ?? []) as Profile[];
+    const list = (data ?? []) as ProfileRow[];
     setEmployees(list);
     return list;
   };
@@ -205,8 +243,8 @@ export default function Attendance() {
   const fetchAttendanceForRange = async (from: string, to: string) => {
     if (!companyId) return [];
 
-    // Join attendance -> profiles so we can filter by company + branch properly
-    let q = supabase
+    // ✅ Avoid TS deep inference issues
+    let q = (supabase as any)
       .from("attendance")
       .select(
         `
@@ -234,8 +272,9 @@ export default function Attendance() {
       .is("profile.deleted_at", null)
       .order("date", { ascending: false });
 
-    if (activeBranchId) {
-      q = q.eq("profile.branch_id", activeBranchId as any);
+    // ✅ Scope attendance rows by branch consistently
+    if (scopeBranchId) {
+      q = q.eq("profile.branch_id", scopeBranchId as any);
     }
 
     const { data, error } = await q;
@@ -250,8 +289,7 @@ export default function Attendance() {
       return [];
     }
 
-    // branches table: id, name, address, phone, email, company_id, is_active
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from("branches")
       .select("id,name,address,phone,email,company_id,is_active")
       .eq("company_id", companyId as any);
@@ -304,22 +342,46 @@ export default function Attendance() {
   useEffect(() => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, companyId, activeBranchId, selectedMonth]);
+  }, [user, companyId, scopeBranchId, selectedMonth]);
 
   /* =========================
    * Clock in/out
    * ========================= */
 
   const clockInEmployee = async (employeeUserId: string) => {
+    if (!canClock) {
+      toast({
+        title: "Not allowed",
+        description: "Admins cannot clock staff in/out. Use an Attendance Manager account.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!companyId) {
+      toast({ title: "Missing company", variant: "destructive" });
+      return;
+    }
+
+    if (!scopeBranchId) {
+      toast({
+        title: "Missing branch",
+        description: "Attendance actions require a branch scope.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // ✅ include company_id + branch_id so RLS + NOT NULL pass
     const payload = {
       user_id: employeeUserId,
       date: today,
       clock_in: new Date().toISOString(),
-      // send branch_id so your branch_* policies pass cleanly
-      branch_id: activeBranchId ?? (profile as any)?.branch_id ?? null,
+      company_id: companyId,
+      branch_id: scopeBranchId,
     };
 
-    const { error } = await supabase
+    const { error } = await (supabase as any)
       .from("attendance")
       .upsert(payload, { onConflict: "user_id,date" });
 
@@ -340,7 +402,16 @@ export default function Attendance() {
   };
 
   const clockOutEmployee = async (attendanceId: string) => {
-    const { error } = await supabase
+    if (!canClock) {
+      toast({
+        title: "Not allowed",
+        description: "Admins cannot clock staff in/out. Use an Attendance Manager account.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const { error } = await (supabase as any)
       .from("attendance")
       .update({ clock_out: new Date().toISOString() })
       .eq("id", attendanceId);
@@ -553,19 +624,14 @@ export default function Attendance() {
     </style>
   `;
 
-  /**
-   * Contact rules:
-   * - If ALL branches: show one combined "Company Contacts" (no per-branch listing)
-   * - If selected branch: show only that branch contact
-   */
   const buildContactBlockHtml = () => {
     const co = companyName || "Company";
 
     const selectedBranch =
-      activeBranchId ? branchContacts.find((b) => b.id === activeBranchId) : null;
+      scopeBranchId ? branchContacts.find((b) => b.id === scopeBranchId) : null;
 
-    if (!activeBranchId) {
-      // ALL branches: combined contacts only
+    if (!scopeBranchId && isAdmin) {
+      // ALL branches: combined contacts only (admin only scenario)
       const phones = Array.from(
         new Set(branchContacts.map((b) => (b.phone || "").trim()).filter(Boolean))
       );
@@ -593,7 +659,7 @@ export default function Attendance() {
       <div class="box">
         <div class="boxTitle">Branch Contacts</div>
         <div class="muted" style="font-size:12px; line-height:1.5;">
-          <div><b>Branch:</b> ${escapeHtml(selectedBranch?.name || activeBranchName || "Selected Branch")}</div>
+          <div><b>Branch:</b> ${escapeHtml(selectedBranch?.name || activeBranchName || "Branch")}</div>
           <div><b>Address:</b> ${escapeHtml(selectedBranch?.address || "-")}</div>
           <div><b>Phone:</b> ${escapeHtml(selectedBranch?.phone || "-")}</div>
           <div><b>Email:</b> ${escapeHtml(selectedBranch?.email || "-")}</div>
@@ -606,13 +672,15 @@ export default function Attendance() {
     const co = companyName || "Company";
     const initials = companyInitials(co);
 
-    // - If branch selected: show ONLY branch name
-    // - If all branches: show "All Branches"
-    const scopeLine = activeBranchId
-      ? (branchContacts.find((b) => b.id === activeBranchId)?.name ||
+   const scopeLine = isAdmin
+  ? (scopeBranchId
+      ? (branchContacts.find((b) => b.id === scopeBranchId)?.name ||
           activeBranchName ||
-          "Selected Branch")
-      : "All Branches";
+          "Branch")
+      : "All Branches")
+  : (branchContacts.find((b) => b.id === scopeBranchId)?.name ||
+      activeBranchName ||
+      "Branch");
 
     const logoHtml = logoDataUrl
       ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
@@ -644,7 +712,6 @@ export default function Attendance() {
 
     const days = enumerateDates(from, to);
 
-    // byDate = who attended per day
     const byDate = new Map<string, Set<string>>();
     for (const r of rows) {
       const d = String(r.date);
@@ -652,7 +719,6 @@ export default function Attendance() {
       byDate.get(d)!.add(r.user_id);
     }
 
-    // ✅ KEEP general off-day logic
     const generalOffDays: string[] = [];
     for (const d of days) {
       const set = byDate.get(d);
@@ -1035,7 +1101,7 @@ export default function Attendance() {
    * UI
    * ========================= */
 
-  if (!canManage) {
+  if (!canView) {
     return (
       <div className="flex items-center justify-center h-full text-slate-400">
         You don't have permission to access this page.
@@ -1047,13 +1113,14 @@ export default function Attendance() {
     <div className="space-y-6">
       <div className="flex flex-col gap-2">
         <h1 className="text-2xl font-bold text-white">Staff Attendance</h1>
-        <p className="text-slate-400">
-          Manage employee clock-in and clock-out • Scope:{" "}
-          <b className="text-slate-200">
-            {activeBranchId ? "Selected Branch" : "All Branches"}
-          </b>
-        </p>
-
+       <p className="text-slate-400">
+  Manage employee clock-in and clock-out • Active Branch:{" "}
+  <b className="text-slate-200">
+    {isAdmin
+      ? (activeBranchId ? (activeBranchName || "Loading…") : "All Branches")
+      : (activeBranchName || "My Branch")}
+  </b>
+</p>
         {/* Export controls */}
         <div className="flex flex-wrap gap-2 items-end">
           <div className="flex flex-col">
@@ -1091,6 +1158,13 @@ export default function Attendance() {
             Export Monthly Summary PDF
           </Button>
         </div>
+
+        {/* ✅ Admin warning: view-only */}
+        {isAdmin && (
+          <p className="text-xs text-slate-500">
+            Admin is view-only on attendance. Use an Attendance Manager account to clock staff in/out.
+          </p>
+        )}
       </div>
 
       {/* Absentees alert */}
@@ -1153,9 +1227,7 @@ export default function Attendance() {
                         </Badge>
                       )}
                     </TableCell>
-                    <TableCell className="text-slate-300">
-                      {emp.phone || "-"}
-                    </TableCell>
+                    <TableCell className="text-slate-300">{emp.phone || "-"}</TableCell>
                     <TableCell className="text-slate-300">
                       {attendance ? formatTime(attendance.clock_in) : "-"}
                     </TableCell>
@@ -1163,13 +1235,15 @@ export default function Attendance() {
                       {attendance ? formatTime(attendance.clock_out) : "-"}
                     </TableCell>
                     <TableCell className="text-slate-300">
-                      {attendance
-                        ? calculateHours(attendance.clock_in, attendance.clock_out)
-                        : "-"}
+                      {attendance ? calculateHours(attendance.clock_in, attendance.clock_out) : "-"}
                     </TableCell>
+
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        {!attendance && (
+                        {/* ✅ Admin cannot clock. Attendance Manager can. */}
+                        {!canClock && <span className="text-xs text-slate-500">View only</span>}
+
+                        {canClock && !attendance && (
                           <Button
                             size="sm"
                             className="bg-green-600 hover:bg-green-700"
@@ -1179,7 +1253,8 @@ export default function Attendance() {
                             Clock In
                           </Button>
                         )}
-                        {attendance && !attendance.clock_out && (
+
+                        {canClock && attendance && !attendance.clock_out && (
                           <Button
                             size="sm"
                             variant="destructive"
@@ -1189,9 +1264,8 @@ export default function Attendance() {
                             Clock Out
                           </Button>
                         )}
-                        {attendance?.clock_out && (
-                          <Badge className="bg-green-600">Completed</Badge>
-                        )}
+
+                        {attendance?.clock_out && <Badge className="bg-green-600">Completed</Badge>}
                       </div>
                     </TableCell>
                   </TableRow>
