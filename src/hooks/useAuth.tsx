@@ -58,6 +58,9 @@ interface AuthContextType {
 
   loading: boolean;
 
+  // ✅ NEW: lets pages safely wait for the initial getSession/onAuthStateChange
+  authReady: boolean;
+
   signIn: (
     email: string,
     password: string
@@ -224,6 +227,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [roles, setRoles] = useState<AppRole[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // ✅ NEW: marks “initial auth has been determined”
+  const [authReady, setAuthReady] = useState(false);
+
   const [branchNameState, setBranchNameState] = useState<string | null>(null);
 
   const [company, setCompany] = useState<CompanyMini | null>(null);
@@ -237,6 +243,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const fetchSeq = useRef(0);
   const mountedRef = useRef(true);
   const lastFetchedUserIdRef = useRef<string | null>(null);
+
+  // ✅ NEW: helps block “post-logout” async work inside this hook
+  const signingOutRef = useRef(false);
 
   const watchdogRef = useRef<number | null>(null);
   const kickWatchdog = () => {
@@ -288,6 +297,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const persistActiveBranchToDb = async (newBranchId: string | null) => {
     if (!user?.id) return;
     if (!isAdmin) return;
+    if (signingOutRef.current) return;
 
     try {
       await supabase
@@ -504,6 +514,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       safeSetBranchName(null);
       return;
     }
+    if (signingOutRef.current) return;
 
     try {
       const queryPromise = Promise.resolve(
@@ -515,7 +526,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       safeSetBranchName((data as any)?.name ?? null);
     } catch (e) {
-      console.warn("[useAuth] branch name fetch failed:", e);
+      if (!signingOutRef.current) console.warn("[useAuth] branch name fetch failed:", e);
       safeSetBranchName(null);
     }
   };
@@ -528,6 +539,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {}
       return;
     }
+    if (signingOutRef.current) return;
 
     try {
       const queryPromise = Promise.resolve(
@@ -545,7 +557,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         else localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
       } catch {}
     } catch (e) {
-      console.warn("[useAuth] active branch name fetch failed:", e);
+      if (!signingOutRef.current) console.warn("[useAuth] active branch name fetch failed:", e);
     }
   };
 
@@ -554,6 +566,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       safeSetBranches([]);
       return [];
     }
+    if (signingOutRef.current) return [];
 
     try {
       const queryPromise = Promise.resolve(
@@ -576,7 +589,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       safeSetBranches(list);
       return list;
     } catch (e) {
-      console.warn("[useAuth] branches fetch failed:", e);
+      if (!signingOutRef.current) console.warn("[useAuth] branches fetch failed:", e);
       safeSetBranches([]);
       return [];
     }
@@ -596,6 +609,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       safeSetBranches([]);
       return;
     }
+    if (signingOutRef.current) return;
+
     fetchBranches(companyIdFromProfile).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, companyIdFromProfile]);
@@ -628,8 +643,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isAdmin) return;
     if (!companyIdFromProfile) return;
-
     if (!activeBranchIdState) return;
+    if (signingOutRef.current) return;
 
     const ok = branchesState.some((b) => b.id === activeBranchIdState);
     if (ok) return;
@@ -681,7 +696,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       return signedUrl;
     } catch (e) {
-      console.warn("[useAuth] signCompanyLogoUrl failed:", e);
+      if (!signingOutRef.current) console.warn("[useAuth] signCompanyLogoUrl failed:", e);
       return null;
     }
   };
@@ -697,6 +712,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       writeCachedCompanyLogoUrl(userId, null);
       return null;
     }
+    if (signingOutRef.current) return null;
 
     try {
       const queryPromise = Promise.resolve(
@@ -717,12 +733,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await resolveCompanyLogoUrl(userId, c?.logo_url ?? null);
       return c;
     } catch (e) {
-      console.warn("[useAuth] company fetch failed:", e);
+      if (!signingOutRef.current) console.warn("[useAuth] company fetch failed:", e);
       return null;
     }
   };
 
   const ensureProfileRowExists = async (userId: string) => {
+    if (signingOutRef.current) return;
+
     try {
       const checkPromise = Promise.resolve(
         supabase.from("profiles").select("id, company_id").eq("user_id", userId).maybeSingle()
@@ -760,7 +778,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (error) throw error;
     } catch (e: any) {
       const msg = String(e?.message || "");
-      console.warn("[useAuth] ensureProfileRowExists failed:", e);
+      if (!signingOutRef.current) console.warn("[useAuth] ensureProfileRowExists failed:", e);
 
       if (msg.includes("company_id") && msg.toLowerCase().includes("not-null")) {
         console.warn(
@@ -776,6 +794,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let lastErr: any = null;
 
     for (let attempt = 1; attempt <= PROFILE_FETCH_RETRIES; attempt++) {
+      if (signingOutRef.current) return null;
+
       try {
         const queryPromise = Promise.resolve(
           supabase
@@ -851,6 +871,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const data = await fetchProfileWithRetry(userId);
       if (mySeq !== fetchSeq.current) return null;
+      if (signingOutRef.current) return null;
 
       if (!data) {
         await ensureProfileRowExists(userId);
@@ -918,7 +939,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       return data as unknown as Profile | null;
     } catch (err) {
-      console.error("[useAuth] Error fetching user data:", err);
+      if (!signingOutRef.current) console.error("[useAuth] Error fetching user data:", err);
 
       if (cachedProfile) return cachedProfile;
 
@@ -947,6 +968,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshProfile = async () => {
     if (!user?.id) return null;
+    if (signingOutRef.current) return null;
+
     safeSetLoading(true);
     kickWatchdog();
     const p = await fetchUserData(user.id);
@@ -955,6 +978,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshCompany = async () => {
     if (!user?.id) return null;
+    if (signingOutRef.current) return null;
+
     const cId = (profile as any)?.company_id ?? null;
     const updated = await fetchCompany(user.id, cId);
     return updated;
@@ -967,6 +992,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      // ✅ once we get any auth state callback, we can consider auth “ready”
+      setAuthReady(true);
+
       safeSetSession(nextSession);
       safeSetUser(nextSession?.user ?? null);
 
@@ -1037,6 +1065,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.error("[useAuth] getSession failed:", e);
         safeSetLoading(false);
         stopWatchdog();
+      } finally {
+        // ✅ mark initial check complete even if errors happened
+        setAuthReady(true);
       }
     })();
 
@@ -1238,7 +1269,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const repairMissingCompanyId: AuthContextType["repairMissingCompanyId"] = async () => {
     try {
-      const payload = await callEdge<{ ok: boolean; repaired?: number }>("repair-missing-company-id", {});
+      const payload = await callEdge<{ ok: boolean; repaired?: number }>(
+        "repair-missing-company-id",
+        {}
+      );
       return { error: null, repaired: Number((payload as any)?.repaired ?? 0) };
     } catch (e: any) {
       return { error: e instanceof Error ? e : new Error(String(e)) };
@@ -1274,21 +1308,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const signOut = async () => {
-    clearCachedProfile();
-    clearCachedCompany();
+  // ✅ NEW: central “clear everything now” so UI stops querying ASAP
+  const clearAllAuthStateNow = () => {
+    fetchSeq.current++; // cancels in-flight fetchUserData updates
+    lastFetchedUserIdRef.current = null;
+
+    safeSetSession(null);
+    safeSetUser(null);
+
+    safeSetProfile(null);
+    safeSetRoles([]);
+    safeSetActiveBranch(null);
+    safeSetBranchName(null);
+
+    safeSetCompany(null);
+    safeSetCompanyLogoUrl(null);
+
+    safeSetBranches([]);
+    safeSetActiveBranchName(null);
 
     try {
       localStorage.removeItem(ADMIN_ACTIVE_BRANCH_KEY);
       localStorage.removeItem(ADMIN_ACTIVE_BRANCH_NAME_KEY);
     } catch {}
 
-    safeSetBranches([]);
-    safeSetActiveBranchName(null);
+    safeSetLoading(false);
+    stopWatchdog();
+  };
 
-    safeSetCompany(null);
-    safeSetCompanyLogoUrl(null);
-    await supabase.auth.signOut();
+  const signOut = async () => {
+    signingOutRef.current = true;
+
+    // ✅ clear caches first
+    clearCachedProfile();
+    clearCachedCompany();
+
+    // ✅ IMPORTANT: clear UI state immediately (prevents post-logout queries)
+    clearAllAuthStateNow();
+
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      signingOutRef.current = false;
+      // authReady stays true (we already know auth state)
+      setAuthReady(true);
+    }
   };
 
   const hasRole = (role: AppRole) =>
@@ -1317,6 +1381,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setActiveBranchId,
 
         loading,
+        authReady,
+
         signIn,
         signUp,
         bootstrapFirstAdmin,

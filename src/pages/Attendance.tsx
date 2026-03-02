@@ -46,6 +46,9 @@ type ProfileRow = {
   // optional permission toggles (if you store them)
   is_attendance_manager?: boolean | null;
   is_returns_handler?: boolean | null;
+
+  // ✅ some DBs still have this boolean
+  is_admin?: boolean | null;
 };
 
 interface AttendanceRow {
@@ -225,6 +228,9 @@ export default function Attendance() {
       .select("*")
       .eq("company_id", companyId as any)
       .is("deleted_at", null)
+      // ✅ OPTION A: exclude admin from attendance completely
+      .neq("role", "admin")
+      .neq("is_admin", true)
       .order("full_name");
 
     // ✅ Staff must always be scoped to their branch; admin uses active selection
@@ -260,6 +266,7 @@ export default function Attendance() {
           full_name,
           phone,
           role,
+          is_admin,
           company_id,
           branch_id,
           deleted_at
@@ -270,6 +277,9 @@ export default function Attendance() {
       .lte("date", to)
       .eq("profile.company_id", companyId as any)
       .is("profile.deleted_at", null)
+      // ✅ keep admin excluded consistently (even if an admin attendance row exists)
+      .neq("profile.role", "admin")
+      .neq("profile.is_admin", true)
       .order("date", { ascending: false });
 
     // ✅ Scope attendance rows by branch consistently
@@ -672,15 +682,15 @@ export default function Attendance() {
     const co = companyName || "Company";
     const initials = companyInitials(co);
 
-   const scopeLine = isAdmin
-  ? (scopeBranchId
-      ? (branchContacts.find((b) => b.id === scopeBranchId)?.name ||
+    const scopeLine = isAdmin
+      ? (scopeBranchId
+          ? (branchContacts.find((b) => b.id === scopeBranchId)?.name ||
+              activeBranchName ||
+              "Branch")
+          : "All Branches")
+      : (branchContacts.find((b) => b.id === scopeBranchId)?.name ||
           activeBranchName ||
-          "Branch")
-      : "All Branches")
-  : (branchContacts.find((b) => b.id === scopeBranchId)?.name ||
-      activeBranchName ||
-      "Branch");
+          "Branch");
 
     const logoHtml = logoDataUrl
       ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
@@ -1113,14 +1123,15 @@ export default function Attendance() {
     <div className="space-y-6">
       <div className="flex flex-col gap-2">
         <h1 className="text-2xl font-bold text-white">Staff Attendance</h1>
-       <p className="text-slate-400">
-  Manage employee clock-in and clock-out • Active Branch:{" "}
-  <b className="text-slate-200">
-    {isAdmin
-      ? (activeBranchId ? (activeBranchName || "Loading…") : "All Branches")
-      : (activeBranchName || "My Branch")}
-  </b>
-</p>
+        <p className="text-slate-400">
+          Manage employee clock-in and clock-out • Active Branch:{" "}
+          <b className="text-slate-200">
+            {isAdmin
+              ? (activeBranchId ? (activeBranchName || "Loading…") : "All Branches")
+              : (activeBranchName || "My Branch")}
+          </b>
+        </p>
+
         {/* Export controls */}
         <div className="flex flex-wrap gap-2 items-end">
           <div className="flex flex-col">
@@ -1162,7 +1173,8 @@ export default function Attendance() {
         {/* ✅ Admin warning: view-only */}
         {isAdmin && (
           <p className="text-xs text-slate-500">
-            Admin is view-only on attendance. Use an Attendance Manager account to clock staff in/out.
+            Admin is exempted from attendance. Admin can view/export reports only.
+            Use an Attendance Manager account to clock staff in/out.
           </p>
         )}
       </div>
@@ -1240,7 +1252,6 @@ export default function Attendance() {
 
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        {/* ✅ Admin cannot clock. Attendance Manager can. */}
                         {!canClock && <span className="text-xs text-slate-500">View only</span>}
 
                         {canClock && !attendance && (

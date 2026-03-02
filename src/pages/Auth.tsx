@@ -172,8 +172,6 @@ export default function Auth() {
       }
 
       // 2️⃣ Bootstrap first admin + company
-      // NOTE: TypeScript error happens because Database types don't know this RPC yet.
-      // Runtime is fine. We safely bypass typing using (supabase as any).
       const { error: bootstrapError } = await (supabase as any).rpc("bootstrap_first_admin", {
         company_name: signupCompanyName,
         full_name: signupName,
@@ -196,6 +194,34 @@ export default function Auth() {
       navigate("/", { replace: true });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // ✅ IMPORTANT: Change password requires a session (logged in).
+  // So we check session first to avoid the "flash then return" behavior.
+  const handleGoChangePassword = async () => {
+    if (isLoading) return;
+
+    try {
+      const { data } = await supabase.auth.getSession();
+      const session = data.session;
+
+      if (!session) {
+        toast({
+          title: "Login required",
+          description: "Please login first, then you can change your password.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      navigate("/change-password");
+    } catch (e: any) {
+      toast({
+        title: "Error",
+        description: e?.message || "Could not check session",
+        variant: "destructive",
+      });
     }
   };
 
@@ -259,6 +285,17 @@ export default function Auth() {
                   {isLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
                   Login
                 </Button>
+
+                {/* ✅ Change Password (no flashing) */}
+                <Button
+  type="button"
+  variant="outline"
+  className="w-full"
+  disabled={isLoading}
+  onClick={() => navigate("/change-password")}
+>
+  Change Password
+</Button>
               </form>
             </TabsContent>
 

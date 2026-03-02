@@ -58,6 +58,9 @@ import StaffSettings from "./pages/settings/StaffSettings";
 // ✅ NEW: System settings page (create this file)
 import SystemSettings from "./pages/settings/SystemSettings";
 
+// ✅ NEW: Change Password page (you created this in Step 2)
+import ChangePassword from "./pages/ChangePassword";
+
 const queryClient = new QueryClient();
 
 function FullScreenLoading({ label = "Loading..." }: { label?: string }) {
@@ -66,6 +69,21 @@ function FullScreenLoading({ label = "Loading..." }: { label?: string }) {
       <div className="text-white">{label}</div>
     </div>
   );
+}
+
+/**
+ * ✅ AuthOnlyRoute
+ * - Only requires logged-in user (session)
+ * - DOES NOT require company/branch/role
+ * - Perfect for change-password (because some users are pending or have fake emails)
+ */
+function AuthOnlyRoute({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+
+  if (loading) return <FullScreenLoading />;
+  if (!user) return <Navigate to="/auth" replace />;
+
+  return <Layout>{children}</Layout>;
 }
 
 /**
@@ -227,6 +245,9 @@ function AppRoutes() {
           </AuthRoute>
         }
       />
+
+      {/* ✅ Change Password (PUBLIC - user enters email + old password + new password) */}
+<Route path="/change-password" element={<ChangePassword />} />
 
       {/* ✅ Employee "waiting for admin assignment" */}
       <Route

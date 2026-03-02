@@ -14,7 +14,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { CartItem, Product } from '@/types/database';
 import { FileText, Minus, Plus, Printer, Search, ShoppingCart, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 type ReceiptItem = {
@@ -195,6 +195,29 @@ function printHtmlViaIframe(html: string, onAfter?: () => void) {
   }, 450);
 }
 
+/** ✅ Detect "duplicate receipt number" errors reliably (different shapes possible) */
+function isReceiptDuplicateErr(err: any) {
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '');
+  const details = String(err?.details || '');
+  const hint = String(err?.hint || '');
+
+  if (code === '23505') return true;
+
+  const blob = (msg + ' ' + details + ' ' + hint).toLowerCase();
+  return (
+    blob.includes('duplicate key') &&
+    (blob.includes('sales_receipt_number_key') || blob.includes('receipt_number'))
+  );
+}
+
+/** ✅ If collision happens, make the receipt number unique on retry */
+function withCollisionSuffix(base: string, attempt: number) {
+  if (attempt <= 1) return base;
+  const rnd = Math.floor(100 + Math.random() * 900); // 100-999
+  return `${base}-${rnd}`;
+}
+
 export default function POS() {
   // ✅ IMPORTANT: pull activeBranchId + branchId from useAuth
   const { user, profile, activeBranchId, branchId } = useAuth();
@@ -211,6 +234,9 @@ export default function POS() {
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [processing, setProcessing] = useState(false);
+
+  // ✅ prevents double-submit (mobile tap / lag / print dialog)
+  const checkoutLockRef = useRef(false);
 
   // ✅ company + branch for receipt header
   const [company, setCompany] = useState<CompanyMini | null>(null);
@@ -788,8 +814,18 @@ export default function POS() {
     `;
   };
 
+  /**
+   * ✅ UPDATED: retry-safe checkout (fixes "duplicate receipt_number")
+   * - prevents double submit using checkoutLockRef
+   * - retries sale insert if unique constraint happens
+   * - adds suffix on retry to guarantee uniqueness
+   */
   const handleCheckoutAndPrint = async () => {
     if (!validateCheckout()) return;
+
+    // ✅ stop double tap
+    if (checkoutLockRef.current) return;
+    checkoutLockRef.current = true;
 
     setProcessing(true);
 
@@ -797,79 +833,96 @@ export default function POS() {
     let couponId: string | null = null;
 
     try {
-      const { data: receiptData, error: receiptErr } = await supabase.rpc('generate_receipt_number');
-      if (receiptErr) throw receiptErr;
+      const MAX_TRIES = 6;
 
-      const receiptNumber = receiptData || `RCP-${Date.now()}`;
+      for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+        // ✅ always start from RPC base number
+        const { data: receiptData, error: receiptErr } = await supabase.rpc('generate_receipt_number');
+        if (receiptErr) throw receiptErr;
 
-      // ✅ create sale
-      const { data: sale, error: saleError } = await supabase
-        .from('sales')
-        .insert({
-          receipt_number: receiptNumber,
-          cashier_id: user!.id,
-          customer_name: customerName.trim(),
-          customer_phone: customerPhone.trim(),
-          total_amount: total,
-          status: 'pending',
-        })
-        .select()
-        .single();
+        const baseReceipt = String(receiptData || '').trim() || `RCP-${Date.now()}`;
+        const receiptNumber = withCollisionSuffix(baseReceipt, attempt);
 
-      if (saleError) throw saleError;
-      saleId = sale.id;
+        // ✅ create sale
+        const { data: sale, error: saleError } = await supabase
+          .from('sales')
+          .insert({
+            receipt_number: receiptNumber,
+            cashier_id: user!.id,
+            customer_name: customerName.trim(),
+            customer_phone: customerPhone.trim(),
+            total_amount: total,
+            status: 'pending',
+          })
+          .select()
+          .single();
 
-      // ✅ create sale_items
-      const saleItems = cart.map((item) => ({
-        sale_id: sale.id,
-        product_id: item.product.id,
-        quantity: item.quantity,
-        unit_price: item.product.unit_price,
-      }));
-
-      const { error: itemsError } = await supabase.from('sale_items').insert(saleItems);
-      if (itemsError) throw itemsError;
-
-      // ✅ create coupon (active)
-      const { data: couponData, error: couponErr } = await supabase
-        .from('sale_coupons' as any)
-        .insert({ sale_id: sale.id, issued_by: user!.id })
-        .select('id')
-        .single();
-
-      if (couponErr) throw couponErr;
-
-      couponId = (couponData as any)?.id ?? null;
-      if (!couponId) throw new Error('Coupon was created but ID could not be read');
-
-      // reset UI
-      setCart([]);
-      setCustomerName('');
-      setCustomerPhone('');
-      setCheckoutOpen(false);
-
-      toast({ title: 'Sale Complete', description: `Receipt: ${receiptNumber}` });
-      fetchProducts();
-
-      // ✅ print
-      const data = await fetchReceiptData(sale.id);
-      if (!data) throw new Error('Could not load receipt for printing');
-
-      const html = buildPrintHtml(data, sale.id);
-
-      printHtmlViaIframe(html, async () => {
-        // ✅ best effort: mark printed after print dialog opens
-        if (couponId) {
-          const { error } = await rpcAny('mark_coupon_printed', { p_coupon_id: couponId });
-          if (error) {
-            toast({
-              title: 'Printed but not recorded',
-              description: error.message,
-              variant: 'destructive',
-            });
+        // ✅ handle duplicate receipt -> retry
+        if (saleError) {
+          if (isReceiptDuplicateErr(saleError) && attempt < MAX_TRIES) {
+            continue; // try again with suffix
           }
+          throw saleError;
         }
-      });
+
+        saleId = sale.id;
+
+        // ✅ create sale_items
+        const saleItems = cart.map((item) => ({
+          sale_id: sale.id,
+          product_id: item.product.id,
+          quantity: item.quantity,
+          unit_price: item.product.unit_price,
+        }));
+
+        const { error: itemsError } = await supabase.from('sale_items').insert(saleItems);
+        if (itemsError) throw itemsError;
+
+        // ✅ create coupon (active)
+        const { data: couponData, error: couponErr } = await supabase
+          .from('sale_coupons' as any)
+          .insert({ sale_id: sale.id, issued_by: user!.id })
+          .select('id')
+          .single();
+
+        if (couponErr) throw couponErr;
+
+        couponId = (couponData as any)?.id ?? null;
+        if (!couponId) throw new Error('Coupon was created but ID could not be read');
+
+        // reset UI
+        setCart([]);
+        setCustomerName('');
+        setCustomerPhone('');
+        setCheckoutOpen(false);
+
+        toast({ title: 'Sale Complete', description: `Receipt: ${receiptNumber}` });
+        fetchProducts();
+
+        // ✅ print
+        const data = await fetchReceiptData(sale.id);
+        if (!data) throw new Error('Could not load receipt for printing');
+
+        const html = buildPrintHtml(data, sale.id);
+
+        printHtmlViaIframe(html, async () => {
+          // ✅ best effort: mark printed after print dialog opens
+          if (couponId) {
+            const { error } = await rpcAny('mark_coupon_printed', { p_coupon_id: couponId });
+            if (error) {
+              toast({
+                title: 'Printed but not recorded',
+                description: error.message,
+                variant: 'destructive',
+              });
+            }
+          }
+        });
+
+        return; // ✅ success
+      }
+
+      throw new Error('Could not generate a unique receipt number. Try again.');
     } catch (error: any) {
       toast({
         title: 'Confirm/Print issue',
@@ -887,6 +940,7 @@ export default function POS() {
       }
     } finally {
       setProcessing(false);
+      checkoutLockRef.current = false;
     }
   };
 
