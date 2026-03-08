@@ -101,8 +101,26 @@ type CategoryMini = {
   company_id: string;
 };
 
+type PendingOfflineSale = {
+  local_id: string;
+  created_at: string;
+  customer_name: string;
+  customer_phone: string;
+  items: CartItem[];
+  total_amount: number;
+  branch_id: string | null;
+  company_id: string | null;
+};
+
+type SubmitSalePayload = {
+  customerName: string;
+  customerPhone: string;
+  items: CartItem[];
+  totalAmount: number;
+};
+
 const COMPANY_LOGO_BUCKET = "company-logos";
-const SIGNED_URL_TTL = 60 * 60; // 1 hour;
+const SIGNED_URL_TTL = 60 * 60; // 1 hour
 
 const CAT_ALL = "all";
 const CAT_UNCAT = "__uncat__";
@@ -117,6 +135,9 @@ const MAX_SALE_ITEMS_SCAN = 6000;
 // ✅ barcode behavior
 const SCAN_MIN_LEN = 3;
 const SCAN_DEBOUNCE_MS = 120;
+
+// ✅ offline queue
+const OFFLINE_PENDING_SALES_KEY = "pos_offline_pending_sales_v1";
 
 function escapeHtml(str: string) {
   return String(str ?? "")
@@ -168,6 +189,36 @@ function normalizeCode(v: string | null | undefined) {
     .trim()
     .replace(/\s+/g, "")
     .toLowerCase();
+}
+
+function isProbablyNetworkError(err: any) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return (
+    msg.includes("failed to fetch") ||
+    msg.includes("network") ||
+    msg.includes("fetch") ||
+    msg.includes("offline") ||
+    msg.includes("load failed")
+  );
+}
+
+function readPendingOfflineSales(): PendingOfflineSale[] {
+  try {
+    const raw = localStorage.getItem(OFFLINE_PENDING_SALES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingOfflineSales(list: PendingOfflineSale[]) {
+  try {
+    localStorage.setItem(OFFLINE_PENDING_SALES_KEY, JSON.stringify(list));
+  } catch {
+    // ignore
+  }
 }
 
 async function rpcAny<T = any>(fn: string, args?: Record<string, any>) {
@@ -332,10 +383,19 @@ export default function POS() {
   const [catSalesScore, setCatSalesScore] = useState<Map<string, number>>(new Map());
   const [catSalesScanned, setCatSalesScanned] = useState(false);
 
+  // ✅ offline state
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(0);
+  const [syncingOffline, setSyncingOffline] = useState(false);
+
+  // ✅ scan feedback + bulk quantity editing
+  const [scanFeedback, setScanFeedback] = useState<"success" | "error" | null>(null);
+  const [qtyDrafts, setQtyDrafts] = useState<Record<string, string>>({});
+
   const searchRef = useRef<HTMLInputElement>(null);
   const scanTimerRef = useRef<number | null>(null);
   const scanHandledRef = useRef<string>("");
-  const searchAreaRef = useRef<HTMLDivElement | null>(null);
+  const beepRef = useRef<HTMLAudioElement | null>(null);
 
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [customerName, setCustomerName] = useState("");
@@ -351,8 +411,44 @@ export default function POS() {
   const branchFilterId = activeBranchId || branchId;
   const companyId = (profile as any)?.company_id ?? null;
 
+  const refreshPendingOfflineCount = () => {
+    setPendingOfflineCount(readPendingOfflineSales().length);
+  };
+
   useEffect(() => {
     searchRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    refreshPendingOfflineCount();
+  }, []);
+
+  useEffect(() => {
+    try {
+      beepRef.current = new Audio("/beep.mp3");
+      beepRef.current.preload = "auto";
+    } catch {
+      beepRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOnline(true);
+      refreshPendingOfflineCount();
+    };
+    const onOffline = () => {
+      setIsOnline(false);
+      refreshPendingOfflineCount();
+    };
+
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
   }, []);
 
   useEffect(() => {
@@ -582,10 +678,22 @@ export default function POS() {
           return prev;
         }
 
-        return prev.map((item) =>
+        const next = prev.map((item) =>
           item.product.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
         );
+
+        setQtyDrafts((old) => ({
+          ...old,
+          [product.id]: String((existing.quantity || 0) + 1),
+        }));
+
+        return next;
       }
+
+      setQtyDrafts((old) => ({
+        ...old,
+        [product.id]: "1",
+      }));
 
       return [...prev, { product, quantity: 1 }];
     });
@@ -599,6 +707,9 @@ export default function POS() {
 
     const exact = products.find((p) => normalizeCode(p.sku) === code);
     if (!exact) {
+      setScanFeedback("error");
+      window.setTimeout(() => setScanFeedback(null), 200);
+
       if (!opts?.silentNotFound) {
         toast({
           title: "Barcode not found",
@@ -610,6 +721,16 @@ export default function POS() {
     }
 
     addToCart(exact);
+
+    setScanFeedback("success");
+    window.setTimeout(() => setScanFeedback(null), 150);
+
+    try {
+      void beepRef.current?.play();
+    } catch {
+      // ignore
+    }
+
     setSearch("");
     scanHandledRef.current = code;
 
@@ -643,17 +764,89 @@ export default function POS() {
           return item;
         }
 
+        setQtyDrafts((old) => ({
+          ...old,
+          [productId]: String(newQty),
+        }));
+
         return { ...item, quantity: newQty };
       })
     );
   };
 
+  const setExactQuantity = (productId: string, rawValue: string) => {
+    const trimmed = rawValue.trim();
+    const target = cart.find((item) => item.product.id === productId);
+    if (!target) return;
+
+    if (!trimmed) {
+      setQtyDrafts((old) => ({ ...old, [productId]: String(target.quantity) }));
+      return;
+    }
+
+    const parsed = Number(trimmed);
+
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      toast({
+        title: "Invalid quantity",
+        description: "Quantity must be 1 or more",
+        variant: "destructive",
+      });
+      setQtyDrafts((old) => ({ ...old, [productId]: String(target.quantity) }));
+      return;
+    }
+
+    const qty = Math.floor(parsed);
+
+    if (qty > target.product.quantity_in_stock) {
+      toast({
+        title: "Stock limit",
+        description: `Only ${target.product.quantity_in_stock} in stock`,
+        variant: "destructive",
+      });
+      setQtyDrafts((old) => ({
+        ...old,
+        [productId]: String(target.product.quantity_in_stock),
+      }));
+      setCart((prev) =>
+        prev.map((item) =>
+          item.product.id === productId
+            ? { ...item, quantity: target.product.quantity_in_stock }
+            : item
+        )
+      );
+      return;
+    }
+
+    setQtyDrafts((old) => ({ ...old, [productId]: String(qty) }));
+    setCart((prev) =>
+      prev.map((item) => (item.product.id === productId ? { ...item, quantity: qty } : item))
+    );
+  };
+
   const removeFromCart = (productId: string) => {
     setCart((prev) => prev.filter((item) => item.product.id !== productId));
+    setQtyDrafts((old) => {
+      const next = { ...old };
+      delete next[productId];
+      return next;
+    });
   };
 
   const total = useMemo(() => {
     return cart.reduce((sum, item) => sum + Number(item.product.unit_price) * item.quantity, 0);
+  }, [cart]);
+
+  useEffect(() => {
+    setQtyDrafts((old) => {
+      const next: Record<string, string> = {};
+
+      for (const item of cart) {
+        next[item.product.id] = old[item.product.id] ?? String(item.quantity);
+      }
+
+      return next;
+    });
   }, [cart]);
 
   const validateCheckout = () => {
@@ -704,6 +897,37 @@ export default function POS() {
     }
 
     return true;
+  };
+
+  const queueOfflineSale = (payload: SubmitSalePayload) => {
+    const list = readPendingOfflineSales();
+    const pending: PendingOfflineSale = {
+      local_id: `offline-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      created_at: new Date().toISOString(),
+      customer_name: payload.customerName.trim(),
+      customer_phone: payload.customerPhone.trim(),
+      items: payload.items,
+      total_amount: payload.totalAmount,
+      branch_id: branchFilterId ?? null,
+      company_id: companyId ?? null,
+    };
+
+    list.push(pending);
+    writePendingOfflineSales(list);
+    refreshPendingOfflineCount();
+
+    setCart([]);
+    setQtyDrafts({});
+    setCustomerName("");
+    setCustomerPhone("");
+    setCheckoutOpen(false);
+
+    toast({
+      title: "Saved offline",
+      description: "Sale queued locally. It will sync automatically when internet returns.",
+    });
+
+    window.setTimeout(() => searchRef.current?.focus(), 0);
   };
 
   const fetchReceiptData = async (saleId: string): Promise<ReceiptData | null> => {
@@ -1023,76 +1247,64 @@ export default function POS() {
     `;
   };
 
-  const handleCheckoutAndPrint = async () => {
-    if (!validateCheckout()) return;
-
-    if (checkoutLockRef.current) return;
-    checkoutLockRef.current = true;
-
-    setProcessing(true);
-
+  const submitSale = async (
+    payload: SubmitSalePayload,
+    opts?: { skipPrint?: boolean; fromOfflineQueue?: boolean }
+  ) => {
     let saleId: string | null = null;
     let couponId: string | null = null;
 
-    try {
-      const MAX_TRIES = 6;
+    const MAX_TRIES = 6;
 
-      for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
-        const { data: receiptData, error: receiptErr } = await supabase.rpc("generate_receipt_number");
-        if (receiptErr) throw receiptErr;
+    for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+      const { data: receiptData, error: receiptErr } = await supabase.rpc("generate_receipt_number");
+      if (receiptErr) throw receiptErr;
 
-        const baseReceipt = String(receiptData || "").trim() || `RCP-${Date.now()}`;
-        const receiptNumber = withCollisionSuffix(baseReceipt, attempt);
+      const baseReceipt = String(receiptData || "").trim() || `RCP-${Date.now()}`;
+      const receiptNumber = withCollisionSuffix(baseReceipt, attempt);
 
-        const { data: sale, error: saleError } = await supabase
-          .from("sales")
-          .insert({
-            receipt_number: receiptNumber,
-            cashier_id: user!.id,
-            customer_name: customerName.trim(),
-            customer_phone: customerPhone.trim(),
-            total_amount: total,
-            status: "pending",
-          })
-          .select()
-          .single();
+      const { data: sale, error: saleError } = await supabase
+        .from("sales")
+        .insert({
+          receipt_number: receiptNumber,
+          cashier_id: user!.id,
+          customer_name: payload.customerName.trim(),
+          customer_phone: payload.customerPhone.trim(),
+          total_amount: payload.totalAmount,
+          status: "pending",
+        })
+        .select()
+        .single();
 
-        if (saleError) {
-          if (isReceiptDuplicateErr(saleError) && attempt < MAX_TRIES) continue;
-          throw saleError;
-        }
+      if (saleError) {
+        if (isReceiptDuplicateErr(saleError) && attempt < MAX_TRIES) continue;
+        throw saleError;
+      }
 
-        saleId = (sale as any).id;
+      saleId = (sale as any).id;
 
-        const saleItems = cart.map((item) => ({
-          sale_id: (sale as any).id,
-          product_id: item.product.id,
-          quantity: item.quantity,
-          unit_price: item.product.unit_price,
-        }));
+      const saleItems = payload.items.map((item) => ({
+        sale_id: (sale as any).id,
+        product_id: item.product.id,
+        quantity: item.quantity,
+        unit_price: item.product.unit_price,
+      }));
 
-        const { error: itemsError } = await supabase.from("sale_items").insert(saleItems);
-        if (itemsError) throw itemsError;
+      const { error: itemsError } = await supabase.from("sale_items").insert(saleItems);
+      if (itemsError) throw itemsError;
 
-        const { data: couponData, error: couponErr } = await supabase
-          .from("sale_coupons" as any)
-          .insert({ sale_id: (sale as any).id, issued_by: user!.id })
-          .select("id")
-          .single();
+      const { data: couponData, error: couponErr } = await supabase
+        .from("sale_coupons" as any)
+        .insert({ sale_id: (sale as any).id, issued_by: user!.id })
+        .select("id")
+        .single();
 
-        if (couponErr) throw couponErr;
+      if (couponErr) throw couponErr;
 
-        couponId = (couponData as any)?.id ?? null;
-        if (!couponId) throw new Error("Coupon was created but ID could not be read");
+      couponId = (couponData as any)?.id ?? null;
+      if (!couponId) throw new Error("Coupon was created but ID could not be read");
 
-        setCart([]);
-        setCustomerName("");
-        setCustomerPhone("");
-        setCheckoutOpen(false);
-
-        toast({ title: "Sale Complete", description: `Receipt: ${receiptNumber}` });
-        void fetchProducts();
-
+      if (!opts?.skipPrint) {
         const data = await fetchReceiptData((sale as any).id);
         if (!data) throw new Error("Could not load receipt for printing");
 
@@ -1110,28 +1322,124 @@ export default function POS() {
             }
           }
         });
+      }
 
-        // ✅ refresh top categories after a sale
+      return { saleId, couponId, receiptNumber };
+    }
+
+    throw new Error("Could not generate a unique receipt number. Try again.");
+  };
+
+  const syncOfflineSales = async () => {
+    if (!navigator.onLine || syncingOffline || !user) return;
+
+    const pending = readPendingOfflineSales();
+    if (!pending.length) {
+      refreshPendingOfflineCount();
+      return;
+    }
+
+    setSyncingOffline(true);
+
+    try {
+      let queue = [...pending];
+      let syncedCount = 0;
+
+      while (queue.length) {
+        const item = queue[0];
+
+        try {
+          await submitSale(
+            {
+              customerName: item.customer_name,
+              customerPhone: item.customer_phone,
+              items: item.items,
+              totalAmount: item.total_amount,
+            },
+            { skipPrint: true, fromOfflineQueue: true }
+          );
+
+          queue.shift();
+          writePendingOfflineSales(queue);
+          syncedCount += 1;
+        } catch (err: any) {
+          if (isProbablyNetworkError(err)) break;
+          break;
+        }
+      }
+
+      refreshPendingOfflineCount();
+
+      if (syncedCount > 0) {
+        toast({
+          title: "Offline sales synced",
+          description: `${syncedCount} queued sale(s) uploaded successfully.`,
+        });
+        void fetchProducts();
         setCatSalesScanned(false);
+      }
+    } finally {
+      setSyncingOffline(false);
+    }
+  };
 
+  useEffect(() => {
+    if (isOnline) {
+      void syncOfflineSales();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline, user]);
+
+  const handleCheckoutAndPrint = async () => {
+    if (!validateCheckout()) return;
+
+    if (checkoutLockRef.current) return;
+    checkoutLockRef.current = true;
+
+    setProcessing(true);
+
+    const payload: SubmitSalePayload = {
+      customerName,
+      customerPhone,
+      items: cart,
+      totalAmount: total,
+    };
+
+    try {
+      if (!navigator.onLine) {
+        queueOfflineSale(payload);
         return;
       }
 
-      throw new Error("Could not generate a unique receipt number. Try again.");
+      const result = await submitSale(payload, { skipPrint: false });
+
+      setCart([]);
+      setQtyDrafts({});
+      setCustomerName("");
+      setCustomerPhone("");
+      setCheckoutOpen(false);
+
+      toast({ title: "Sale Complete", description: `Receipt: ${result.receiptNumber}` });
+      void fetchProducts();
+
+      // ✅ refresh top categories after a sale
+      setCatSalesScanned(false);
     } catch (error: any) {
+      if (!navigator.onLine && !processing) {
+        queueOfflineSale(payload);
+        return;
+      }
+
+      if (isProbablyNetworkError(error)) {
+        queueOfflineSale(payload);
+        return;
+      }
+
       toast({
         title: "Confirm/Print issue",
         description: error?.message || "Could not complete printing",
         variant: "destructive",
       });
-
-      if (couponId) {
-        navigate(`/pos/coupons?highlight=${encodeURIComponent(couponId)}`);
-      } else if (saleId) {
-        navigate(`/pos/coupons?highlightSale=${encodeURIComponent(saleId)}`);
-      } else {
-        navigate(`/pos/coupons`);
-      }
     } finally {
       setProcessing(false);
       checkoutLockRef.current = false;
@@ -1263,7 +1571,7 @@ export default function POS() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, products]);
 
-  // ✅ keep focus in POS search area when clicking around
+  // ✅ keep focus on search unless in checkout dialog
   useEffect(() => {
     const handlePointer = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
@@ -1274,11 +1582,10 @@ export default function POS() {
       const insideInput =
         target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
-        target.closest("input") ||
-        target.closest("textarea");
+        !!target.closest("input") ||
+        !!target.closest("textarea");
 
       if (insideDialog || insideSheet || insideInput) return;
-
       window.setTimeout(() => searchRef.current?.focus(), 0);
     };
 
@@ -1308,7 +1615,7 @@ export default function POS() {
   const canVirtualize =
     !!GridComp && gridSize.width > 0 && gridSize.height > 0 && filteredProducts.length > 0;
 
-  // ✅ dropdown: only “controls” otherCategories; when activeCategoryId is not one of them, show placeholder
+  // ✅ dropdown: only “controls” otherCategories
   const dropValue = otherCategories.some((c) => c.id === activeCategoryId)
     ? activeCategoryId
     : CAT_DROPDOWN_NONE;
@@ -1318,7 +1625,7 @@ export default function POS() {
       {/* Products */}
       <div className="flex-1 flex flex-col min-h-0">
         <div className="mb-3 flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
-          <div ref={searchAreaRef} className="relative flex-1">
+          <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
             <Input
               ref={searchRef}
@@ -1331,17 +1638,18 @@ export default function POS() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  const ok = tryScanAddProduct(search);
-                  if (!ok) {
-                    // keep normal search text if not exact barcode
-                  }
+                  tryScanAddProduct(search);
                 }
               }}
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="off"
               spellCheck={false}
-              className="pl-10 bg-slate-800 border-slate-700 text-white"
+              className={`pl-10 border text-white transition-all
+                ${scanFeedback === "success" ? "bg-emerald-600/30 border-emerald-400" : ""}
+                ${scanFeedback === "error" ? "bg-red-600/30 border-red-400" : ""}
+                ${!scanFeedback ? "bg-slate-800 border-slate-700" : ""}
+              `}
             />
           </div>
 
@@ -1353,6 +1661,33 @@ export default function POS() {
           >
             <FileText className="h-4 w-4 mr-2" />
             Daily Sales
+          </Button>
+        </div>
+
+        {/* Status row */}
+        <div className="mb-3 flex flex-wrap gap-2 items-center">
+          <span
+            className={`rounded-md px-2 py-1 text-xs font-medium ${
+              isOnline
+                ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                : "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+            }`}
+          >
+            {isOnline ? "Online" : "Offline mode"}
+          </span>
+
+          <span className="rounded-md px-2 py-1 text-xs font-medium bg-slate-800 text-slate-300 border border-slate-700">
+            Pending offline sales: {pendingOfflineCount}
+          </span>
+
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!isOnline || pendingOfflineCount === 0 || syncingOffline}
+            onClick={() => void syncOfflineSales()}
+          >
+            {syncingOffline ? "Syncing..." : "Sync Pending"}
           </Button>
         </div>
 
@@ -1551,16 +1886,60 @@ export default function POS() {
               cart.map((item) => (
                 <div
                   key={item.product.id}
-                  className="flex items-center gap-2 bg-slate-700/50 p-2 rounded-lg"
+                  className="flex items-start gap-2 bg-slate-700/50 p-2 rounded-lg"
                 >
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-white truncate">{item.product.name}</p>
                     <p className="text-xs text-slate-400">
-                      GHS {Number(item.product.unit_price).toLocaleString()} × {item.quantity}
+                      GHS {Number(item.product.unit_price).toLocaleString()} each
+                    </p>
+
+                    <div className="mt-2 flex items-center gap-2">
+                      <Label
+                        htmlFor={`qty-${item.product.id}`}
+                        className="text-[11px] text-slate-400 whitespace-nowrap"
+                      >
+                        Qty
+                      </Label>
+                      <Input
+                        id={`qty-${item.product.id}`}
+                        type="number"
+                        min={1}
+                        max={item.product.quantity_in_stock}
+                        inputMode="numeric"
+                        value={qtyDrafts[item.product.id] ?? String(item.quantity)}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          setQtyDrafts((old) => ({
+                            ...old,
+                            [item.product.id]: raw,
+                          }));
+                        }}
+                        onBlur={(e) => setExactQuantity(item.product.id, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            setExactQuantity(
+                              item.product.id,
+                              qtyDrafts[item.product.id] ?? String(item.quantity)
+                            );
+                            searchRef.current?.focus();
+                          }
+                        }}
+                        className="h-8 w-20 bg-slate-800 border-slate-600 text-white"
+                      />
+                      <span className="text-[11px] text-slate-500">
+                        max {item.product.quantity_in_stock}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-300 mt-2">
+                      Subtotal: GHS{" "}
+                      {Number(item.product.unit_price * item.quantity).toLocaleString()}
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 pt-1">
                     <Button
                       size="icon"
                       variant="ghost"
@@ -1570,7 +1949,7 @@ export default function POS() {
                       <Minus className="h-3 w-3" />
                     </Button>
 
-                    <span className="w-6 text-center text-white text-sm">{item.quantity}</span>
+                    <span className="w-8 text-center text-white text-sm">{item.quantity}</span>
 
                     <Button
                       size="icon"
@@ -1607,7 +1986,7 @@ export default function POS() {
               disabled={cart.length === 0}
               onClick={() => setCheckoutOpen(true)}
             >
-              Checkout
+              {isOnline ? "Checkout" : "Save Offline Sale"}
             </Button>
 
             <Button variant="outline" className="w-full" onClick={() => navigate("/pos/coupons")}>
@@ -1621,7 +2000,9 @@ export default function POS() {
       <Dialog open={checkoutOpen} onOpenChange={setCheckoutOpen}>
         <DialogContent className="bg-slate-800 border-slate-700">
           <DialogHeader>
-            <DialogTitle className="text-white">Complete Sale</DialogTitle>
+            <DialogTitle className="text-white">
+              {isOnline ? "Complete Sale" : "Save Offline Sale"}
+            </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
@@ -1653,10 +2034,21 @@ export default function POS() {
             </div>
 
             <div className="text-xs text-slate-400">
-              Confirm will save the sale and open the print dialog for:
-              <br />• 1 Customer Sales Receipt (no items)
-              <br />• 1 Cashier Sales Receipt (full)
-              <br />• 2 Warehouse Coupons
+              {isOnline ? (
+                <>
+                  Confirm will save the sale and open the print dialog for:
+                  <br />• 1 Customer Sales Receipt (no items)
+                  <br />• 1 Cashier Sales Receipt (full)
+                  <br />• 2 Warehouse Coupons
+                </>
+              ) : (
+                <>
+                  Internet is off.
+                  <br />This sale will be stored on this device and synced automatically when
+                  connection returns.
+                  <br />Printing is skipped until the queued sale is synced.
+                </>
+              )}
             </div>
           </div>
 
@@ -1666,7 +2058,11 @@ export default function POS() {
             </Button>
             <Button onClick={handleCheckoutAndPrint} disabled={processing}>
               <Printer className="h-4 w-4 mr-2" />
-              {processing ? "Processing..." : "Confirm & Print"}
+              {processing
+                ? "Processing..."
+                : isOnline
+                ? "Confirm & Print"
+                : "Save Offline"}
             </Button>
           </DialogFooter>
         </DialogContent>
