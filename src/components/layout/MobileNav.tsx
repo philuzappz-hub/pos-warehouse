@@ -2,7 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { useAuth } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
-import { Building2, LogOut, Menu } from "lucide-react";
+import { LogOut, Menu } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
@@ -77,12 +77,59 @@ export default function MobileNav() {
     return adminBranchNameCached?.trim() || "Loading…";
   }, [activeBranchId, adminBranchNameCached]);
 
+  const branchLabel = useMemo(() => {
+    if (isAdmin) return adminViewingLabel;
+
+    const directBranch =
+      (profile as any)?.active_branch?.name ||
+      (profile as any)?.branch?.name ||
+      (profile as any)?.branch_name ||
+      "";
+
+    return directBranch || "Branch";
+  }, [isAdmin, adminViewingLabel, profile]);
+
+  const pageTitle = useMemo(() => {
+    const path = location.pathname;
+
+    if (path === "/") return "Dashboard";
+    if (path.startsWith("/dashboard")) return "Dashboard";
+    if (path.startsWith("/pos/coupons")) return "POS Coupons";
+    if (path.startsWith("/pos")) return "Point of Sale";
+    if (path.startsWith("/returns")) return "Returns";
+    if (path.startsWith("/returned-items")) return "Returned Items";
+    if (path.startsWith("/expenses/pending")) return "Pending Expenses";
+    if (path.startsWith("/expenses/new")) return "New Expense";
+    if (path.startsWith("/expenses")) return "Expenses";
+    if (path.startsWith("/inventory")) return "Inventory";
+    if (path.startsWith("/attendance")) return "Attendance";
+    if (path.startsWith("/reports/daily-sales")) return "Daily Sales";
+    if (path.startsWith("/reports/stock-balance")) return "Stock Balance";
+    if (path.startsWith("/reports")) return "Reports";
+    if (path.startsWith("/users")) return "Users";
+    if (path.startsWith("/warehouse/my-receipts")) return "My Receipts";
+    if (path.startsWith("/warehouse/receive")) return "Receive Stock";
+    if (path.startsWith("/warehouse")) return "Warehouse";
+    if (path.startsWith("/stock-approvals")) return "Stock Approvals";
+    if (path.startsWith("/settings/company")) return "Company Settings";
+    if (path.startsWith("/settings/branches")) return "Branch Settings";
+    if (path.startsWith("/settings/staff")) return "Staff Settings";
+    if (path.startsWith("/settings/system")) return "System Settings";
+    if (path.startsWith("/settings")) return "Settings";
+    if (path.startsWith("/pending-access")) return "Pending Access";
+    if (path.startsWith("/setup-company")) return "Setup Company";
+    if (path.startsWith("/auth")) return "Sign In";
+
+    return "BuildMat";
+  }, [location.pathname]);
+
   return (
     <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-slate-900 border-b border-slate-800">
       <div className="flex h-14 items-center justify-between px-4">
-        <div className="flex items-center gap-2">
-          <Building2 className="h-6 w-6 text-primary" />
-          <span className="font-bold text-white">BuildMat Pro</span>
+        {/* ✅ Dynamic title + branch label */}
+        <div className="min-w-0">
+          <div className="font-semibold text-white truncate">{pageTitle}</div>
+          <div className="text-xs text-slate-400 truncate">{branchLabel}</div>
         </div>
 
         <Sheet open={open} onOpenChange={setOpen}>
