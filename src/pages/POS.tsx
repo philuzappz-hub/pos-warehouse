@@ -102,7 +102,7 @@ type CategoryMini = {
 };
 
 const COMPANY_LOGO_BUCKET = "company-logos";
-const SIGNED_URL_TTL = 60 * 60; // 1 hour
+const SIGNED_URL_TTL = 60 * 60; // 1 hour;
 
 const CAT_ALL = "all";
 const CAT_UNCAT = "__uncat__";
@@ -113,6 +113,10 @@ const TOP_CAT_WINDOW_DAYS = 30;
 
 // safety limit so we don’t fetch millions of rows
 const MAX_SALE_ITEMS_SCAN = 6000;
+
+// ✅ barcode behavior
+const SCAN_MIN_LEN = 3;
+const SCAN_DEBOUNCE_MS = 120;
 
 function escapeHtml(str: string) {
   return String(str ?? "")
@@ -157,6 +161,13 @@ function cleanLine(parts: Array<string | null | undefined>) {
     .map((p) => (p ?? "").toString().trim())
     .filter(Boolean)
     .join(" • ");
+}
+
+function normalizeCode(v: string | null | undefined) {
+  return String(v ?? "")
+    .trim()
+    .replace(/\s+/g, "")
+    .toLowerCase();
 }
 
 async function rpcAny<T = any>(fn: string, args?: Record<string, any>) {
@@ -322,6 +333,9 @@ export default function POS() {
   const [catSalesScanned, setCatSalesScanned] = useState(false);
 
   const searchRef = useRef<HTMLInputElement>(null);
+  const scanTimerRef = useRef<number | null>(null);
+  const scanHandledRef = useRef<string>("");
+  const searchAreaRef = useRef<HTMLDivElement | null>(null);
 
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [customerName, setCustomerName] = useState("");
@@ -575,6 +589,41 @@ export default function POS() {
 
       return [...prev, { product, quantity: 1 }];
     });
+  };
+
+  const tryScanAddProduct = (rawValue: string, opts?: { silentNotFound?: boolean }) => {
+    const code = normalizeCode(rawValue);
+    if (!code || code.length < SCAN_MIN_LEN) return false;
+
+    if (scanHandledRef.current === code) return true;
+
+    const exact = products.find((p) => normalizeCode(p.sku) === code);
+    if (!exact) {
+      if (!opts?.silentNotFound) {
+        toast({
+          title: "Barcode not found",
+          description: `No product found for code: ${rawValue}`,
+          variant: "destructive",
+        });
+      }
+      return false;
+    }
+
+    addToCart(exact);
+    setSearch("");
+    scanHandledRef.current = code;
+
+    toast({
+      title: "Added to cart",
+      description: exact.name,
+    });
+
+    window.setTimeout(() => {
+      searchRef.current?.focus();
+      searchRef.current?.select?.();
+    }, 0);
+
+    return true;
   };
 
   const updateQuantity = (productId: string, delta: number) => {
@@ -1086,6 +1135,7 @@ export default function POS() {
     } finally {
       setProcessing(false);
       checkoutLockRef.current = false;
+      window.setTimeout(() => searchRef.current?.focus(), 0);
     }
   };
 
@@ -1127,7 +1177,7 @@ export default function POS() {
           salesAmount,
         };
       })
-      .filter((x) => x.invCount > 0); // only show categories with products
+      .filter((x) => x.invCount > 0);
 
     rows.sort((a, b) => {
       if (hasSalesSignal) {
@@ -1182,6 +1232,60 @@ export default function POS() {
     return () => window.clearTimeout(t);
   }, [activeCategoryId, search, products.length, updateNow]);
 
+  // ✅ barcode scan debounce
+  useEffect(() => {
+    if (scanTimerRef.current) {
+      window.clearTimeout(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
+
+    const raw = search.trim();
+    if (!raw) {
+      scanHandledRef.current = "";
+      return;
+    }
+
+    const normalized = normalizeCode(raw);
+    const exactExists = products.some((p) => normalizeCode(p.sku) === normalized);
+
+    if (exactExists && raw.replace(/\s+/g, "").length >= SCAN_MIN_LEN) {
+      scanTimerRef.current = window.setTimeout(() => {
+        tryScanAddProduct(raw, { silentNotFound: true });
+      }, SCAN_DEBOUNCE_MS);
+    }
+
+    return () => {
+      if (scanTimerRef.current) {
+        window.clearTimeout(scanTimerRef.current);
+        scanTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, products]);
+
+  // ✅ keep focus in POS search area when clicking around
+  useEffect(() => {
+    const handlePointer = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+
+      const insideDialog = !!target.closest("[role='dialog']");
+      const insideSheet = !!target.closest("[data-radix-dialog-content]");
+      const insideInput =
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.closest("input") ||
+        target.closest("textarea");
+
+      if (insideDialog || insideSheet || insideInput) return;
+
+      window.setTimeout(() => searchRef.current?.focus(), 0);
+    };
+
+    document.addEventListener("click", handlePointer);
+    return () => document.removeEventListener("click", handlePointer);
+  }, []);
+
   const CARD_MIN_W = 220;
   const CARD_H = 112;
 
@@ -1214,13 +1318,29 @@ export default function POS() {
       {/* Products */}
       <div className="flex-1 flex flex-col min-h-0">
         <div className="mb-3 flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
-          <div className="relative flex-1">
+          <div ref={searchAreaRef} className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
             <Input
               ref={searchRef}
-              placeholder="Search products (name or SKU/barcode)..."
+              placeholder="Search products or scan barcode/SKU..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                if (!e.target.value.trim()) scanHandledRef.current = "";
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const ok = tryScanAddProduct(search);
+                  if (!ok) {
+                    // keep normal search text if not exact barcode
+                  }
+                }
+              }}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               className="pl-10 bg-slate-800 border-slate-700 text-white"
             />
           </div>
@@ -1238,7 +1358,6 @@ export default function POS() {
 
         {/* Categories bar */}
         <div className="mb-3 flex flex-wrap gap-2 items-center w-full">
-          {/* chips area */}
           <div className="flex flex-wrap gap-2 items-center">
             <Button
               variant={activeCategoryId === CAT_ALL ? "default" : "outline"}
@@ -1283,7 +1402,7 @@ export default function POS() {
             })}
           </div>
 
-          {/* ✅ ALWAYS VISIBLE dropdown (disabled when empty) */}
+          {/* ✅ ALWAYS VISIBLE dropdown */}
           <div className="w-full sm:w-[320px] md:w-[380px] flex-1 min-w-[220px]">
             <Select
               value={dropValue}
