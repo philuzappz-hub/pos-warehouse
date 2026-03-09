@@ -9,6 +9,8 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import Attendance from "./pages/Attendance";
 import Auth from "./pages/Auth";
+import CustomerPayments from "./pages/CustomerPayments";
+import Customers from "./pages/Customers";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import NotFound from "./pages/NotFound";
@@ -55,10 +57,10 @@ import CompanySettings from "./pages/settings/CompanySettings";
 import SettingsLayout from "./pages/settings/SettingsLayout";
 import StaffSettings from "./pages/settings/StaffSettings";
 
-// ✅ NEW: System settings page (create this file)
+// ✅ System settings
 import SystemSettings from "./pages/settings/SystemSettings";
 
-// ✅ NEW: Change Password page (you created this in Step 2)
+// ✅ Change Password
 import ChangePassword from "./pages/ChangePassword";
 
 const queryClient = new QueryClient();
@@ -75,7 +77,6 @@ function FullScreenLoading({ label = "Loading..." }: { label?: string }) {
  * ✅ AuthOnlyRoute
  * - Only requires logged-in user (session)
  * - DOES NOT require company/branch/role
- * - Perfect for change-password (because some users are pending or have fake emails)
  */
 function AuthOnlyRoute({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -88,18 +89,14 @@ function AuthOnlyRoute({ children }: { children: ReactNode }) {
 
 /**
  * ✅ ProtectedRoute
- * - Requires user
- * - IMPORTANT: if user exists but profile is still null, do NOT redirect anywhere.
- *   Just keep loading until profile is hydrated.
+ * - Requires logged-in user
+ * - waits for hydrated profile
  */
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, loading, profile } = useAuth();
 
   if (loading) return <FullScreenLoading />;
-
   if (!user) return <Navigate to="/auth" replace />;
-
-  // ✅ avoid bad redirects when profile hasn't hydrated yet
   if (!profile) return <FullScreenLoading label="Syncing account..." />;
 
   return <Layout>{children}</Layout>;
@@ -107,8 +104,7 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
 
 /**
  * ✅ PendingAccessRoute
- * - ONLY for employees who are already linked to a company/branch but still waiting for role/activation
- * - NEW USERS with no company/branch should go to /setup-company (not pending)
+ * - Assigned employee but still waiting for role/activation
  */
 function PendingAccessRoute({ children }: { children: ReactNode }) {
   const { user, loading, profile, isAdmin } = useAuth();
@@ -120,20 +116,14 @@ function PendingAccessRoute({ children }: { children: ReactNode }) {
   const isAssigned = !!profile.company_id || !!profile.branch_id;
   const hasRole = !!profile.role || isAdmin;
 
-  // ✅ NEW: If NOT assigned at all, they should create a company
   if (!isAssigned) return <Navigate to="/setup-company" replace />;
-
-  // ✅ assigned users with role should never stay on pending page
   if (isAssigned && hasRole) return <Navigate to="/" replace />;
 
   return <Layout>{children}</Layout>;
 }
 
 /**
- * ✅ SetupCompanyRoute (UPDATED)
- * - Any user with NO company_id and NO branch_id can create a company (become admin through RPC)
- * - If already has company_id → leave setup
- * - If employee has branch assignment → they shouldn't be here
+ * ✅ SetupCompanyRoute
  */
 function SetupCompanyRoute({ children }: { children: ReactNode }) {
   const { user, loading, profile, isAdmin } = useAuth();
@@ -144,24 +134,17 @@ function SetupCompanyRoute({ children }: { children: ReactNode }) {
 
   const isAssigned = !!profile.company_id || !!profile.branch_id;
 
-  // ✅ company already created → leave setup page immediately
   if (profile.company_id) return <Navigate to="/" replace />;
 
-  // ✅ employees with a branch assignment should NOT be in setup-company
-  // (they are invited employees waiting for admin)
   if (isAssigned && !isAdmin && profile.role !== "admin") {
     return <Navigate to="/pending-access" replace />;
   }
 
-  // ✅ NEW: unassigned users are allowed here even if not admin yet
-  // They become admin during the RPC in SetupCompany
   return <Layout>{children}</Layout>;
 }
 
 /**
- * ✅ RoleProtectedRoute (UPDATED)
- * - if user is NOT assigned at all (no company & no branch) -> always go setup-company
- * - pending-access becomes only for users who ARE assigned but missing role
+ * ✅ RoleProtectedRoute
  */
 function RoleProtectedRoute({
   children,
@@ -190,23 +173,19 @@ function RoleProtectedRoute({
 
   const isAssigned = !!profile.company_id || !!profile.branch_id;
 
-  // ✅ NEW: If user is not assigned at all -> setup-company
   if (!isAssigned) {
     return <Navigate to="/setup-company" replace />;
   }
 
-  // ✅ If assigned but role not set (and not admin) → pending access
   if (!profile.role && !isAdmin) {
     return <Navigate to="/pending-access" replace />;
   }
 
-  // ✅ Role access (NO admin override unless admin explicitly allowed)
   const roleMatch = allowedRoles.some((role) => roles.includes(role as any));
   const adminAllowed = allowedRoles.includes("admin");
   const adminMatch = adminAllowed && isAdmin;
 
   const hasRoleAccess = roleMatch || adminMatch;
-
   const hasManagerAccess = allowAttendanceManager && isAttendanceManager;
   const hasHandlerAccess = allowReturnsHandler && isReturnsHandler;
 
@@ -219,16 +198,12 @@ function RoleProtectedRoute({
 
 /**
  * ✅ AuthRoute
- * - If not logged in → show auth page
- * - If logged in → ALWAYS go to "/" and let Index.tsx decide
  */
 function AuthRoute({ children }: { children: ReactNode }) {
   const { user, loading, profile } = useAuth();
 
   if (loading) return <FullScreenLoading />;
-
   if (!user) return <>{children}</>;
-
   if (!profile) return <FullScreenLoading label="Syncing account..." />;
 
   return <Navigate to="/" replace />;
@@ -246,10 +221,8 @@ function AppRoutes() {
         }
       />
 
-      {/* ✅ Change Password (PUBLIC - user enters email + old password + new password) */}
-<Route path="/change-password" element={<ChangePassword />} />
+      <Route path="/change-password" element={<ChangePassword />} />
 
-      {/* ✅ Employee "waiting for admin assignment" */}
       <Route
         path="/pending-access"
         element={
@@ -259,7 +232,6 @@ function AppRoutes() {
         }
       />
 
-      {/* ✅ Multi-company onboarding */}
       <Route
         path="/setup-company"
         element={
@@ -269,7 +241,6 @@ function AppRoutes() {
         }
       />
 
-      {/* ✅ Gatekeeper route */}
       <Route
         path="/"
         element={
@@ -279,7 +250,6 @@ function AppRoutes() {
         }
       />
 
-      {/* ✅ Explicit dashboard route (admin only) */}
       <Route
         path="/dashboard"
         element={
@@ -289,7 +259,6 @@ function AppRoutes() {
         }
       />
 
-      {/* ✅ Admin Settings Control Panel */}
       <Route
         path="/settings"
         element={
@@ -305,7 +274,6 @@ function AppRoutes() {
         <Route path="system" element={<SystemSettings />} />
       </Route>
 
-      {/* Cashier only */}
       <Route
         path="/pos"
         element={
@@ -315,7 +283,6 @@ function AppRoutes() {
         }
       />
 
-      {/* POS Coupons (Cashier only) */}
       <Route
         path="/pos/coupons"
         element={
@@ -325,7 +292,24 @@ function AppRoutes() {
         }
       />
 
-      {/* Warehouse only */}
+      <Route
+        path="/customers"
+        element={
+          <RoleProtectedRoute allowedRoles={["admin", "cashier"]}>
+            <Customers />
+          </RoleProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/customer-payments"
+        element={
+          <RoleProtectedRoute allowedRoles={["admin", "cashier"]}>
+            <CustomerPayments />
+          </RoleProtectedRoute>
+        }
+      />
+
       <Route
         path="/warehouse"
         element={
@@ -335,7 +319,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Warehouse: Receive Stock */}
       <Route
         path="/warehouse/receive"
         element={
@@ -345,7 +328,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Warehouse: My Receipts */}
       <Route
         path="/warehouse/my-receipts"
         element={
@@ -355,7 +337,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Admin or Attendance Manager */}
       <Route
         path="/attendance"
         element={
@@ -365,7 +346,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Admin only */}
       <Route
         path="/inventory"
         element={
@@ -375,7 +355,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Admin: Stock Approvals */}
       <Route
         path="/stock-approvals"
         element={
@@ -385,7 +364,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Cashier or Returns Handler */}
       <Route
         path="/returns"
         element={
@@ -395,7 +373,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Cashier and Warehouse can view returned items */}
       <Route
         path="/returned-items"
         element={
@@ -405,7 +382,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Admin only */}
       <Route
         path="/users"
         element={
@@ -415,7 +391,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Admin only */}
       <Route
         path="/reports"
         element={
@@ -425,7 +400,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Expenses Overview */}
       <Route
         path="/expenses"
         element={
@@ -435,7 +409,6 @@ function AppRoutes() {
         }
       />
 
-      {/* New Expense */}
       <Route
         path="/expenses/new"
         element={
@@ -445,7 +418,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Pending Queue */}
       <Route
         path="/expenses/pending"
         element={
@@ -455,7 +427,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Daily Sales Report (Cashier only) */}
       <Route
         path="/reports/daily-sales"
         element={
@@ -465,7 +436,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Stock Balance Report (Warehouse only) */}
       <Route
         path="/reports/stock-balance"
         element={

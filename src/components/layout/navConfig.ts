@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   ShoppingCart,
   Users,
+  Wallet,
   Warehouse as WarehouseIcon,
 } from "lucide-react";
 
@@ -27,32 +28,131 @@ export type NavItem = {
 };
 
 export const navigation: NavItem[] = [
-  // ✅ Make "/" available to admin too (prevents nav gaps if app uses "/" as main landing)
-  { name: "Dashboard", href: "/", icon: LayoutDashboard, roles: ["admin", "cashier", "warehouse", "staff"] },
-  
+  // Dashboard
+  {
+    name: "Dashboard",
+    href: "/",
+    icon: LayoutDashboard,
+    roles: ["admin", "cashier", "warehouse", "staff"],
+  },
 
-  { name: "Point of Sale", href: "/pos", icon: ShoppingCart, roles: ["cashier"] },
-  { name: "POS Coupons", href: "/pos/coupons", icon: FileText, roles: ["cashier"] },
+  // POS
+  {
+    name: "Point of Sale",
+    href: "/pos",
+    icon: ShoppingCart,
+    roles: ["cashier"],
+  },
+  {
+    name: "POS Coupons",
+    href: "/pos/coupons",
+    icon: FileText,
+    roles: ["cashier"],
+  },
 
-  { name: "Warehouse", href: "/warehouse", icon: WarehouseIcon, roles: ["warehouse"] },
-  { name: "Receive Stock", href: "/warehouse/receive", icon: PackagePlus, roles: ["warehouse"] },
-  { name: "My Receipts", href: "/warehouse/my-receipts", icon: ClipboardList, roles: ["warehouse"] },
+  // Customers
+  {
+    name: "Customers",
+    href: "/customers",
+    icon: Users,
+    roles: ["admin", "cashier"],
+  },
 
-  { name: "Stock Approvals", href: "/stock-approvals", icon: ShieldCheck, roles: ["admin"] },
+  // ✅ NEW: Customer Payments / Debts
+  {
+    name: "Customer Payments",
+    href: "/customer-payments",
+    icon: Wallet,
+    roles: ["admin", "cashier"],
+  },
 
-  // ✅ Admin sees Attendance + Attendance Manager sees Attendance
-  { name: "Attendance", href: "/attendance", icon: Clock, roles: ["admin"], allowAttendanceManager: true },
+  // Warehouse
+  {
+    name: "Warehouse",
+    href: "/warehouse",
+    icon: WarehouseIcon,
+    roles: ["warehouse"],
+  },
+  {
+    name: "Receive Stock",
+    href: "/warehouse/receive",
+    icon: PackagePlus,
+    roles: ["warehouse"],
+  },
+  {
+    name: "My Receipts",
+    href: "/warehouse/my-receipts",
+    icon: ClipboardList,
+    roles: ["warehouse"],
+  },
 
-  { name: "Inventory", href: "/inventory", icon: Package, roles: ["admin"] },
+  // Admin
+  {
+    name: "Stock Approvals",
+    href: "/stock-approvals",
+    icon: ShieldCheck,
+    roles: ["admin"],
+  },
 
-  { name: "Returns", href: "/returns", icon: RotateCcw, roles: ["cashier"], allowReturnsHandler: true },
-  { name: "Returned Items", href: "/returned-items", icon: FileCheck, roles: ["cashier", "warehouse"] },
+  {
+    name: "Attendance",
+    href: "/attendance",
+    icon: Clock,
+    roles: ["admin"],
+    allowAttendanceManager: true,
+  },
 
-  { name: "Employees", href: "/users", icon: Users, roles: ["admin"] },
+  {
+    name: "Inventory",
+    href: "/inventory",
+    icon: Package,
+    roles: ["admin"],
+  },
 
-  // ✅ Intentional: returns handler can see Expenses
-  { name: "Expenses", href: "/expenses", icon: FileText, roles: ["admin", "cashier"], allowReturnsHandler: true },
+  {
+    name: "Returns",
+    href: "/returns",
+    icon: RotateCcw,
+    roles: ["cashier"],
+    allowReturnsHandler: true,
+  },
 
-  { name: "Reports", href: "/reports", icon: BarChart3, roles: ["admin"] },
-  { name: "Settings", href: "/settings", icon: Settings, roles: ["admin"] },
+  {
+    name: "Returned Items",
+    href: "/returned-items",
+    icon: FileCheck,
+    roles: ["cashier", "warehouse"],
+  },
+
+  {
+    name: "Employees",
+    href: "/users",
+    icon: Users,
+    roles: ["admin"],
+  },
+
+  // Expenses
+  {
+    name: "Expenses",
+    href: "/expenses",
+    icon: FileText,
+    roles: ["admin", "cashier"],
+    allowReturnsHandler: true,
+  },
+
+  // Reports
+  {
+    name: "Reports",
+    href: "/reports",
+    icon: BarChart3,
+    roles: ["admin"],
+  },
+
+  // Settings
+  {
+    name: "Settings",
+    href: "/settings",
+    icon: Settings,
+    roles: ["admin"],
+  },
 ];

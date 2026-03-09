@@ -20,6 +20,7 @@ import {
   Search,
   ShoppingCart,
   Trash2,
+  UserPlus,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -59,6 +60,9 @@ type CartItem = {
   quantity: number;
 };
 
+type PaymentMethod = "cash" | "momo" | "card" | "credit";
+type PaymentStatus = "paid" | "partial" | "credit";
+
 type ReceiptItem = {
   name: string;
   sku: string | null;
@@ -74,6 +78,10 @@ type ReceiptData = {
   cashier_name: string;
   items: ReceiptItem[];
   total_amount: number;
+  payment_method?: string | null;
+  payment_status?: string | null;
+  amount_paid?: number | null;
+  balance_due?: number | null;
 };
 
 type CompanyMini = {
@@ -101,22 +109,46 @@ type CategoryMini = {
   company_id: string;
 };
 
+type Customer = {
+  id: string;
+  full_name: string;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  notes: string | null;
+  is_active: boolean;
+  branch_id: string | null;
+  company_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type PendingOfflineSale = {
   local_id: string;
   created_at: string;
+  customer_id: string | null;
   customer_name: string;
   customer_phone: string;
   items: CartItem[];
   total_amount: number;
+  payment_method: PaymentMethod;
+  payment_status: PaymentStatus;
+  amount_paid: number;
+  balance_due: number;
   branch_id: string | null;
   company_id: string | null;
 };
 
 type SubmitSalePayload = {
+  customerId: string | null;
   customerName: string;
   customerPhone: string;
   items: CartItem[];
   totalAmount: number;
+  paymentMethod: PaymentMethod;
+  paymentStatus: PaymentStatus;
+  amountPaid: number;
+  balanceDue: number;
 };
 
 const COMPANY_LOGO_BUCKET = "company-logos";
@@ -200,6 +232,25 @@ function isProbablyNetworkError(err: any) {
     msg.includes("offline") ||
     msg.includes("load failed")
   );
+}
+
+function normalizePaymentMethod(v: string): PaymentMethod {
+  if (v === "momo" || v === "card" || v === "credit") return v;
+  return "cash";
+}
+
+function derivePaymentStatus(
+  totalAmount: number,
+  amountPaid: number,
+  paymentMethod: PaymentMethod
+): PaymentStatus {
+  const total = Number(totalAmount || 0);
+  const paid = Math.max(0, Number(amountPaid || 0));
+
+  if (paymentMethod === "credit") return "credit";
+  if (paid <= 0) return "credit";
+  if (paid >= total) return "paid";
+  return "partial";
 }
 
 function readPendingOfflineSales(): PendingOfflineSale[] {
@@ -379,6 +430,17 @@ export default function POS() {
   const [categories, setCategories] = useState<CategoryMini[]>([]);
   const [activeCategoryId, setActiveCategoryId] = useState<string>(CAT_ALL);
 
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+
+  const [quickCustomerOpen, setQuickCustomerOpen] = useState(false);
+  const [savingQuickCustomer, setSavingQuickCustomer] = useState(false);
+  const [quickCustomerName, setQuickCustomerName] = useState("");
+  const [quickCustomerPhone, setQuickCustomerPhone] = useState("");
+  const [quickCustomerEmail, setQuickCustomerEmail] = useState("");
+  const [quickCustomerAddress, setQuickCustomerAddress] = useState("");
+
   // ✅ SALES-based “patronized” score per category (last 30 days)
   const [catSalesScore, setCatSalesScore] = useState<Map<string, number>>(new Map());
   const [catSalesScanned, setCatSalesScanned] = useState(false);
@@ -400,6 +462,8 @@ export default function POS() {
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [amountPaidInput, setAmountPaidInput] = useState("");
   const [processing, setProcessing] = useState(false);
 
   const checkoutLockRef = useRef(false);
@@ -413,6 +477,188 @@ export default function POS() {
 
   const refreshPendingOfflineCount = () => {
     setPendingOfflineCount(readPendingOfflineSales().length);
+  };
+
+  const resetQuickCustomerForm = () => {
+    setQuickCustomerName(customerName || customerSearch || "");
+    setQuickCustomerPhone(customerPhone || "");
+    setQuickCustomerEmail("");
+    setQuickCustomerAddress("");
+  };
+
+  const loadCustomers = async () => {
+    if (!companyId) {
+      setCustomers([]);
+      return;
+    }
+
+    const { data, error } = await (supabase as any)
+      .from("customers")
+      .select(
+        "id,full_name,phone,email,address,notes,is_active,branch_id,company_id,created_at,updated_at"
+      )
+      .eq("company_id", companyId)
+      .eq("is_active", true)
+      .order("full_name");
+
+    if (error) {
+      setCustomers([]);
+      return;
+    }
+
+    setCustomers((data || []) as Customer[]);
+  };
+
+  const findOrCreateCustomer = async (
+    name: string,
+    phone: string
+  ): Promise<string | null> => {
+    try {
+      if (!companyId) return null;
+
+      const cleanName = name.trim();
+      const cleanPhone = phone.trim().replace(/\s+/g, "");
+
+      if (!cleanName || !cleanPhone) return null;
+
+      const { data: existingByPhone } = await (supabase as any)
+        .from("customers")
+        .select("id")
+        .eq("company_id", companyId)
+        .eq("phone", cleanPhone)
+        .maybeSingle();
+
+      if (existingByPhone?.id) {
+        return existingByPhone.id;
+      }
+
+      const { data, error } = await (supabase as any)
+        .from("customers")
+        .insert({
+          full_name: cleanName,
+          phone: cleanPhone,
+          company_id: companyId,
+          branch_id: branchFilterId,
+          is_active: true,
+        })
+        .select("id")
+        .single();
+
+      if (error) throw error;
+
+      await loadCustomers();
+      return data?.id ?? null;
+    } catch (e) {
+      console.error("Customer create failed", e);
+      return null;
+    }
+  };
+
+  const handleQuickCreateCustomer = async () => {
+    if (!companyId) {
+      toast({
+        title: "Company missing",
+        description: "Your profile has no company assigned.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!quickCustomerName.trim()) {
+      toast({
+        title: "Name required",
+        description: "Please enter customer name.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const cleanedPhone = quickCustomerPhone.trim().replace(/\s+/g, "");
+    if (cleanedPhone && cleanedPhone.length < 9) {
+      toast({
+        title: "Invalid phone",
+        description: "Phone number looks too short.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSavingQuickCustomer(true);
+
+    try {
+      // ✅ if same phone already exists, select it instead of inserting duplicate
+      if (cleanedPhone) {
+        const { data: existingCustomer, error: existingError } = await (supabase as any)
+          .from("customers")
+          .select(
+            "id,full_name,phone,email,address,notes,is_active,branch_id,company_id,created_at,updated_at"
+          )
+          .eq("company_id", companyId)
+          .eq("phone", cleanedPhone)
+          .maybeSingle();
+
+        if (existingError) throw existingError;
+
+        if (existingCustomer) {
+          const found = existingCustomer as Customer;
+
+          setSelectedCustomer(found);
+          setCustomerSearch(found.full_name || "");
+          setCustomerName(found.full_name || "");
+          setCustomerPhone(found.phone || "");
+          setQuickCustomerOpen(false);
+
+          toast({
+            title: "Customer already exists",
+            description: `${found.full_name} was found and selected.`,
+          });
+          return;
+        }
+      }
+
+      const payload = {
+        full_name: quickCustomerName.trim(),
+        phone: cleanedPhone || null,
+        email: quickCustomerEmail.trim() || null,
+        address: quickCustomerAddress.trim() || null,
+        branch_id: branchFilterId ?? null,
+        company_id: companyId,
+        is_active: true,
+      };
+
+      const { data, error } = await (supabase as any)
+        .from("customers")
+        .insert(payload)
+        .select(
+          "id,full_name,phone,email,address,notes,is_active,branch_id,company_id,created_at,updated_at"
+        )
+        .single();
+
+      if (error) throw error;
+
+      const created = data as Customer;
+
+      await loadCustomers();
+
+      setSelectedCustomer(created);
+      setCustomerSearch(created.full_name || "");
+      setCustomerName(created.full_name || "");
+      setCustomerPhone(created.phone || "");
+      setQuickCustomerOpen(false);
+
+      toast({
+        title: "Customer saved",
+        description: `${created.full_name} has been added and selected.`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Could not save customer",
+        description: error?.message || "Failed to create customer.",
+        variant: "destructive",
+      });
+    } finally {
+      setSavingQuickCustomer(false);
+    }
   };
 
   useEffect(() => {
@@ -479,6 +725,17 @@ export default function POS() {
 
     void loadCategories();
   }, [companyId]);
+
+  useEffect(() => {
+    void loadCustomers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId]);
+
+  useEffect(() => {
+    if (!selectedCustomer) return;
+    setCustomerName(selectedCustomer.full_name || "");
+    setCustomerPhone(selectedCustomer.phone || "");
+  }, [selectedCustomer]);
 
   // ✅ load company + branch details (printing)
   useEffect(() => {
@@ -838,6 +1095,35 @@ export default function POS() {
   }, [cart]);
 
   useEffect(() => {
+    if (!checkoutOpen) return;
+
+    if (paymentMethod === "credit") {
+      setAmountPaidInput("0");
+      return;
+    }
+
+    if (!amountPaidInput.trim()) {
+      setAmountPaidInput(String(Number(total || 0)));
+    }
+  }, [paymentMethod, checkoutOpen, total, amountPaidInput]);
+
+  const amountPaidNumber = useMemo(() => {
+    const n = Number(amountPaidInput || 0);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return n;
+  }, [amountPaidInput]);
+
+  const paymentStatus = useMemo(
+    () => derivePaymentStatus(total, amountPaidNumber, paymentMethod),
+    [total, amountPaidNumber, paymentMethod]
+  );
+
+  const balanceDue = useMemo(() => {
+    const due = Number(total || 0) - Number(amountPaidNumber || 0);
+    return due > 0 ? due : 0;
+  }, [total, amountPaidNumber]);
+
+  useEffect(() => {
     setQtyDrafts((old) => {
       const next: Record<string, string> = {};
 
@@ -848,6 +1134,29 @@ export default function POS() {
       return next;
     });
   }, [cart]);
+
+  const filteredCustomers = useMemo(() => {
+    const q = customerSearch.trim().toLowerCase();
+
+    const base = customers.filter((c) => {
+      if (!branchFilterId) return true;
+      return c.branch_id === null || c.branch_id === branchFilterId;
+    });
+
+    if (!q) return base.slice(0, 20);
+
+    return base
+      .filter((c) => {
+        return (
+          String(c.full_name || "").toLowerCase().includes(q) ||
+          String(c.phone || "").toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 20);
+  }, [customers, customerSearch, branchFilterId]);
+
+  const showQuickCreateCustomer =
+    !!customerSearch.trim() && filteredCustomers.length === 0 && isOnline;
 
   const validateCheckout = () => {
     if (!user) {
@@ -896,6 +1205,24 @@ export default function POS() {
       return false;
     }
 
+    if (paymentMethod !== "credit" && amountPaidNumber <= 0) {
+      toast({
+        title: "Amount paid required",
+        description: "Enter amount paid for this transaction.",
+        variant: "destructive",
+      });
+      return false;
+    }
+
+    if (amountPaidNumber > total) {
+      toast({
+        title: "Amount too high",
+        description: "Amount paid cannot exceed total amount.",
+        variant: "destructive",
+      });
+      return false;
+    }
+
     return true;
   };
 
@@ -904,10 +1231,15 @@ export default function POS() {
     const pending: PendingOfflineSale = {
       local_id: `offline-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       created_at: new Date().toISOString(),
+      customer_id: payload.customerId,
       customer_name: payload.customerName.trim(),
       customer_phone: payload.customerPhone.trim(),
       items: payload.items,
       total_amount: payload.totalAmount,
+      payment_method: payload.paymentMethod,
+      payment_status: payload.paymentStatus,
+      amount_paid: payload.amountPaid,
+      balance_due: payload.balanceDue,
       branch_id: branchFilterId ?? null,
       company_id: companyId ?? null,
     };
@@ -920,6 +1252,10 @@ export default function POS() {
     setQtyDrafts({});
     setCustomerName("");
     setCustomerPhone("");
+    setCustomerSearch("");
+    setSelectedCustomer(null);
+    setPaymentMethod("cash");
+    setAmountPaidInput("");
     setCheckoutOpen(false);
 
     toast({
@@ -968,6 +1304,10 @@ export default function POS() {
         cashier_name: cashierName,
         items,
         total_amount: Number(sale.total_amount || 0),
+        payment_method: sale.payment_method ?? null,
+        payment_status: sale.payment_status ?? null,
+        amount_paid: Number(sale.amount_paid || 0),
+        balance_due: Number(sale.balance_due || 0),
       };
     } catch (e: any) {
       toast({
@@ -994,7 +1334,11 @@ export default function POS() {
 
     const receiptNumber = escapeHtml(data.receipt_number);
     const now = new Date(data.created_at || Date.now()).toLocaleString();
-    const totalPaid = money(data.total_amount);
+    const totalAmount = money(data.total_amount);
+    const amountPaid = money(Number(data.amount_paid || 0));
+    const balanceDueText = money(Number(data.balance_due || 0));
+    const paymentMethodText = String(data.payment_method || "cash").toUpperCase();
+    const paymentStatusText = String(data.payment_status || "paid").toUpperCase();
 
     const customerLine =
       (data.customer_name ? escapeHtml(data.customer_name) : "Walk-in") +
@@ -1016,6 +1360,33 @@ export default function POS() {
         `;
       })
       .join("");
+
+    const paymentSummaryHtml = `
+      <table>
+        <tbody>
+          <tr>
+            <td>Total</td>
+            <td class="r">GHS ${totalAmount}</td>
+          </tr>
+          <tr>
+            <td>Paid</td>
+            <td class="r">GHS ${amountPaid}</td>
+          </tr>
+          <tr>
+            <td>Balance</td>
+            <td class="r">GHS ${balanceDueText}</td>
+          </tr>
+          <tr>
+            <td>Method</td>
+            <td class="r">${escapeHtml(paymentMethodText)}</td>
+          </tr>
+          <tr>
+            <td>Status</td>
+            <td class="r">${escapeHtml(paymentStatusText)}</td>
+          </tr>
+        </tbody>
+      </table>
+    `;
 
     const brandHtml = `
       <div class="brand">
@@ -1052,14 +1423,7 @@ export default function POS() {
 
         <div class="dash"></div>
 
-        <table>
-          <tbody>
-            <tr class="totalRow">
-              <td>Total Paid</td>
-              <td class="r">GHS ${totalPaid}</td>
-            </tr>
-          </tbody>
-        </table>
+        ${paymentSummaryHtml}
 
         <div class="dash"></div>
 
@@ -1103,14 +1467,7 @@ export default function POS() {
 
         <div class="dash"></div>
 
-        <table>
-          <tbody>
-            <tr class="totalRow">
-              <td colspan="3">Total</td>
-              <td class="r">GHS ${totalPaid}</td>
-            </tr>
-          </tbody>
-        </table>
+        ${paymentSummaryHtml}
 
         <div class="dash"></div>
 
@@ -1136,6 +1493,7 @@ export default function POS() {
           <div><b>Date:</b> ${escapeHtml(now)}</div>
           <div><b>Customer:</b> ${customerLine}</div>
           <div><b>Cashier:</b> ${escapeHtml(data.cashier_name)}</div>
+          <div><b>Payment:</b> ${escapeHtml(paymentStatusText)}</div>
         </div>
 
         <div class="dash"></div>
@@ -1221,7 +1579,6 @@ export default function POS() {
             .r { text-align:right; white-space: nowrap; }
             .pname { font-weight: 600; }
             .psku { font-size: 11px; color: var(--muted); margin-top: 1px; }
-            .totalRow { font-weight: 900; font-size: 13px; }
             .note { text-align:center; font-size: 12px; margin-top: 10px; }
             .muted { color: var(--muted); }
             .sigWrap { margin-top: 14px; font-size: 12px; }
@@ -1257,7 +1614,9 @@ export default function POS() {
     const MAX_TRIES = 6;
 
     for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
-      const { data: receiptData, error: receiptErr } = await supabase.rpc("generate_receipt_number");
+      const { data: receiptData, error: receiptErr } = await supabase.rpc(
+        "generate_receipt_number"
+      );
       if (receiptErr) throw receiptErr;
 
       const baseReceipt = String(receiptData || "").trim() || `RCP-${Date.now()}`;
@@ -1268,9 +1627,14 @@ export default function POS() {
         .insert({
           receipt_number: receiptNumber,
           cashier_id: user!.id,
+          customer_id: payload.customerId,
           customer_name: payload.customerName.trim(),
           customer_phone: payload.customerPhone.trim(),
           total_amount: payload.totalAmount,
+          payment_method: payload.paymentMethod,
+          payment_status: payload.paymentStatus,
+          amount_paid: payload.amountPaid,
+          balance_due: payload.balanceDue,
           status: "pending",
         })
         .select()
@@ -1351,10 +1715,15 @@ export default function POS() {
         try {
           await submitSale(
             {
+              customerId: item.customer_id ?? null,
               customerName: item.customer_name,
               customerPhone: item.customer_phone,
               items: item.items,
               totalAmount: item.total_amount,
+              paymentMethod: normalizePaymentMethod(item.payment_method),
+              paymentStatus: item.payment_status,
+              amountPaid: Number(item.amount_paid || 0),
+              balanceDue: Number(item.balance_due || 0),
             },
             { skipPrint: true, fromOfflineQueue: true }
           );
@@ -1398,11 +1767,22 @@ export default function POS() {
 
     setProcessing(true);
 
+    let customerId = selectedCustomer?.id ?? null;
+
+    if (!customerId && customerName.trim() && customerPhone.trim()) {
+      customerId = await findOrCreateCustomer(customerName, customerPhone);
+    }
+
     const payload: SubmitSalePayload = {
+      customerId,
       customerName,
       customerPhone,
       items: cart,
       totalAmount: total,
+      paymentMethod,
+      paymentStatus,
+      amountPaid: paymentMethod === "credit" ? 0 : amountPaidNumber,
+      balanceDue: paymentMethod === "credit" ? total : balanceDue,
     };
 
     try {
@@ -1417,6 +1797,10 @@ export default function POS() {
       setQtyDrafts({});
       setCustomerName("");
       setCustomerPhone("");
+      setCustomerSearch("");
+      setSelectedCustomer(null);
+      setPaymentMethod("cash");
+      setAmountPaidInput("");
       setCheckoutOpen(false);
 
       toast({ title: "Sale Complete", description: `Receipt: ${result.receiptNumber}` });
@@ -1984,7 +2368,11 @@ export default function POS() {
               className="w-full"
               size="lg"
               disabled={cart.length === 0}
-              onClick={() => setCheckoutOpen(true)}
+              onClick={() => {
+                setPaymentMethod("cash");
+                setAmountPaidInput(String(Number(total || 0)));
+                setCheckoutOpen(true);
+              }}
             >
               {isOnline ? "Checkout" : "Save Offline Sale"}
             </Button>
@@ -1997,62 +2385,194 @@ export default function POS() {
       </Card>
 
       {/* Checkout Dialog */}
-      <Dialog open={checkoutOpen} onOpenChange={setCheckoutOpen}>
-        <DialogContent className="bg-slate-800 border-slate-700">
-          <DialogHeader>
+      <Dialog
+        open={checkoutOpen}
+        onOpenChange={(open) => {
+          setCheckoutOpen(open);
+          if (!open) {
+            setCustomerSearch("");
+            setSelectedCustomer(null);
+          }
+        }}
+      >
+        <DialogContent className="bg-slate-800 border-slate-700 max-w-2xl w-[95vw] max-h-[90vh] overflow-hidden p-0">
+          <DialogHeader className="px-6 pt-6 pb-3 border-b border-slate-700">
             <DialogTitle className="text-white">
               {isOnline ? "Complete Sale" : "Save Offline Sale"}
             </DialogTitle>
           </DialogHeader>
 
-          <div className="space-y-4">
-            <div>
-              <Label className="text-slate-200">Customer Name (required)</Label>
-              <Input
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                className="bg-slate-700 border-slate-600 text-white"
-                placeholder="Enter customer name"
-              />
-            </div>
+          <div className="overflow-y-auto px-6 py-4 max-h-[calc(90vh-140px)]">
+            <div className="space-y-4">
+              <div>
+                <Label className="text-slate-200">Saved Customer</Label>
+                <Input
+                  value={customerSearch}
+                  onChange={(e) => setCustomerSearch(e.target.value)}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Search saved customer by name or phone"
+                />
 
-            <div>
-              <Label className="text-slate-200">Phone Number (required)</Label>
-              <Input
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
-                className="bg-slate-700 border-slate-600 text-white"
-                placeholder="Enter phone number"
-              />
-            </div>
+                {customerSearch.trim() && filteredCustomers.length > 0 && (
+                  <div className="mt-2 max-h-40 overflow-auto rounded-md border border-slate-600 bg-slate-900">
+                    {filteredCustomers.map((customer) => (
+                      <button
+                        key={customer.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedCustomer(customer);
+                          setCustomerSearch(customer.full_name);
+                          setCustomerName(customer.full_name || "");
+                          setCustomerPhone(customer.phone || "");
+                        }}
+                        className="w-full px-3 py-2 text-left hover:bg-slate-800 border-b border-slate-700 last:border-b-0"
+                      >
+                        <div className="text-sm text-white">{customer.full_name}</div>
+                        <div className="text-xs text-slate-400">{customer.phone || "No phone"}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
 
-            <div className="bg-slate-700/50 p-4 rounded-lg">
-              <div className="flex justify-between text-white font-bold text-xl">
-                <span>Total Amount</span>
-                <span>GHS {Number(total).toLocaleString()}</span>
+                {showQuickCreateCustomer && (
+                  <div className="mt-2 rounded-md border border-slate-600 bg-slate-900 p-3">
+                    <p className="text-sm text-white">No saved customer found for this search.</p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Create a new customer and use it immediately for this sale.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="mt-3 border-slate-600 bg-slate-800 text-white"
+                      onClick={() => {
+                        resetQuickCustomerForm();
+                        setQuickCustomerOpen(true);
+                      }}
+                    >
+                      <UserPlus className="h-4 w-4 mr-2" />
+                      New Customer
+                    </Button>
+                  </div>
+                )}
+
+                {selectedCustomer ? (
+                  <p className="mt-2 text-xs text-emerald-400">
+                    Using saved customer: {selectedCustomer.full_name}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-400">
+                    No saved customer selected. Manual entry will be treated as walk-in customer.
+                  </p>
+                )}
               </div>
-            </div>
 
-            <div className="text-xs text-slate-400">
-              {isOnline ? (
-                <>
-                  Confirm will save the sale and open the print dialog for:
-                  <br />• 1 Customer Sales Receipt (no items)
-                  <br />• 1 Cashier Sales Receipt (full)
-                  <br />• 2 Warehouse Coupons
-                </>
-              ) : (
-                <>
-                  Internet is off.
-                  <br />This sale will be stored on this device and synced automatically when
-                  connection returns.
-                  <br />Printing is skipped until the queued sale is synced.
-                </>
-              )}
+              <div>
+                <Label className="text-slate-200">Customer Name (required)</Label>
+                <Input
+                  value={customerName}
+                  onChange={(e) => {
+                    setSelectedCustomer(null);
+                    setCustomerName(e.target.value);
+                  }}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter customer name"
+                />
+              </div>
+
+              <div>
+                <Label className="text-slate-200">Phone Number (required)</Label>
+                <Input
+                  value={customerPhone}
+                  onChange={(e) => {
+                    setSelectedCustomer(null);
+                    setCustomerPhone(e.target.value);
+                  }}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter phone number"
+                />
+              </div>
+
+              <div>
+                <Label className="text-slate-200">Payment Method</Label>
+                <Select
+                  value={paymentMethod}
+                  onValueChange={(v) => setPaymentMethod(normalizePaymentMethod(v))}
+                >
+                  <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
+                    <SelectValue placeholder="Select payment method" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-slate-900 border-slate-700 text-white">
+                    <SelectItem value="cash">Cash</SelectItem>
+                    <SelectItem value="momo">Mobile Money</SelectItem>
+                    <SelectItem value="card">Card</SelectItem>
+                    <SelectItem value="credit">Credit (Pay Later)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <Label className="text-slate-200">
+                  Amount Paid {paymentMethod === "credit" ? "(locked for credit sale)" : ""}
+                </Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={paymentMethod === "credit" ? "0" : amountPaidInput}
+                  onChange={(e) => setAmountPaidInput(e.target.value)}
+                  disabled={paymentMethod === "credit"}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter amount paid"
+                />
+              </div>
+
+              <div className="bg-slate-700/50 p-4 rounded-lg space-y-2">
+                <div className="flex justify-between text-white">
+                  <span>Total Amount</span>
+                  <span>GHS {Number(total).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-white">
+                  <span>Amount Paid</span>
+                  <span>
+                    GHS{" "}
+                    {Number(paymentMethod === "credit" ? 0 : amountPaidNumber).toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-between text-white">
+                  <span>Balance Due</span>
+                  <span>
+                    GHS {Number(paymentMethod === "credit" ? total : balanceDue).toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-between text-white font-semibold">
+                  <span>Payment Status</span>
+                  <span>{paymentMethod === "credit" ? "credit" : paymentStatus}</span>
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-400 pb-2">
+                {isOnline ? (
+                  <>
+                    Confirm will save the sale and open the print dialog for:
+                    <br />• 1 Customer Sales Receipt (no items)
+                    <br />• 1 Cashier Sales Receipt (full)
+                    <br />• 2 Warehouse Coupons
+                  </>
+                ) : (
+                  <>
+                    Internet is off.
+                    <br />
+                    This sale will be stored on this device and synced automatically when connection
+                    returns.
+                    <br />
+                    Printing is skipped until the queued sale is synced.
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
-          <DialogFooter>
+          <DialogFooter className="px-6 py-4 border-t border-slate-700">
             <Button variant="outline" onClick={() => setCheckoutOpen(false)} disabled={processing}>
               Cancel
             </Button>
@@ -2063,6 +2583,80 @@ export default function POS() {
                 : isOnline
                 ? "Confirm & Print"
                 : "Save Offline"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Quick Add Customer Dialog */}
+      <Dialog
+        open={quickCustomerOpen}
+        onOpenChange={(open) => {
+          setQuickCustomerOpen(open);
+          if (!open) {
+            setSavingQuickCustomer(false);
+          }
+        }}
+      >
+        <DialogContent className="bg-slate-800 border-slate-700 max-w-lg w-[95vw] max-h-[90vh] overflow-hidden p-0">
+          <DialogHeader className="px-6 pt-6 pb-3 border-b border-slate-700">
+            <DialogTitle className="text-white">New Customer</DialogTitle>
+          </DialogHeader>
+
+          <div className="overflow-y-auto px-6 py-4 max-h-[calc(90vh-140px)]">
+            <div className="space-y-4">
+              <div>
+                <Label className="text-slate-200">Full Name *</Label>
+                <Input
+                  value={quickCustomerName}
+                  onChange={(e) => setQuickCustomerName(e.target.value)}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter customer full name"
+                />
+              </div>
+
+              <div>
+                <Label className="text-slate-200">Phone</Label>
+                <Input
+                  value={quickCustomerPhone}
+                  onChange={(e) => setQuickCustomerPhone(e.target.value)}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter phone number"
+                />
+              </div>
+
+              <div>
+                <Label className="text-slate-200">Email</Label>
+                <Input
+                  value={quickCustomerEmail}
+                  onChange={(e) => setQuickCustomerEmail(e.target.value)}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter email"
+                />
+              </div>
+
+              <div>
+                <Label className="text-slate-200">Address</Label>
+                <Input
+                  value={quickCustomerAddress}
+                  onChange={(e) => setQuickCustomerAddress(e.target.value)}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Enter address"
+                />
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="px-6 py-4 border-t border-slate-700">
+            <Button
+              variant="outline"
+              onClick={() => setQuickCustomerOpen(false)}
+              disabled={savingQuickCustomer}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleQuickCreateCustomer} disabled={savingQuickCustomer}>
+              {savingQuickCustomer ? "Saving..." : "Save Customer"}
             </Button>
           </DialogFooter>
         </DialogContent>
