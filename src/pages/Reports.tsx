@@ -13,7 +13,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { BarChart3, Package, TrendingUp } from "lucide-react";
+import { BarChart3, Package, TrendingUp, Wallet } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 /** -----------------------------
@@ -21,8 +21,15 @@ import { useEffect, useMemo, useState } from "react";
  * ------------------------------*/
 interface SalesSummary {
   totalSales: number;
-  totalAmount: number;
+  totalAmount: number; // gross sales value
+  totalPaidAmount: number; // actual money collected on those sales rows
+  outstandingDebt: number; // all open valid sales balances
+  totalCustomerDebt: number; // only customer-linked debt
   avgSale: number;
+
+  paidSalesCount: number;
+  partialSalesCount: number;
+  creditSalesCount: number;
 
   returnsApprovedAmount: number;
   returnsApprovedCount: number;
@@ -31,8 +38,9 @@ interface SalesSummary {
   expensesApprovedAmount: number;
   expensesApprovedCount: number;
 
-  totalDeductions: number; // ✅ returns + expenses
-  netAfterDeductions: number; // ✅ revenue - (returns + expenses)
+  totalDeductions: number; // returns + expenses
+  netAfterDeductions: number; // gross revenue - deductions
+  netCollectedAfterDeductions: number; // collected money - deductions
 }
 
 interface TopProduct {
@@ -62,8 +70,6 @@ type CompanyRow = {
   address: string | null;
   phone: string | null;
   email: string | null;
-
-  // ✅ logo fields (optional, depends on your schema)
   logo_url?: string | null;
   receipt_footer?: string | null;
   tax_id?: string | null;
@@ -72,14 +78,17 @@ type CompanyRow = {
 type BranchCompareRow = {
   branch_id: string;
   branch_name: string;
-  total_sales: number; // count
+  total_sales: number;
   total_revenue: number;
+  total_paid: number;
+  outstanding_debt: number;
 
   approved_returns: number;
   approved_expenses: number;
 
-  total_deductions: number; // returns + expenses
-  net_after_deductions: number; // revenue - deductions
+  total_deductions: number;
+  net_after_deductions: number;
+  net_collected_after_deductions: number;
 };
 
 /** -----------------------------
@@ -105,7 +114,6 @@ function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
-/** Turn "Wemah Company Limited" -> "WCL" */
 function companyInitials(name: string) {
   const cleaned = String(name || "")
     .replace(/[^a-zA-Z0-9\s]/g, " ")
@@ -140,14 +148,19 @@ async function urlToDataUrl(url?: string | null): Promise<string | null> {
   }
 }
 
+function isValidSale(row: any) {
+  if (!row) return false;
+  if (row?.is_returned) return false;
+
+  const status = String(row?.status || "").toLowerCase();
+  if (status === "cancelled" || status === "returned") return false;
+
+  return true;
+}
+
 export default function Reports() {
   const { toast } = useToast();
-  const {
-    activeBranchId,
-    profile,
-    companyName,
-    companyLogoUrl, // ✅ logo from useAuth (same idea as Expenses)
-  } = useAuth() as any;
+  const { activeBranchId, profile, companyName, companyLogoUrl } = useAuth() as any;
 
   const companyId = (profile as any)?.company_id ?? null;
 
@@ -157,7 +170,14 @@ export default function Reports() {
   const [salesSummary, setSalesSummary] = useState<SalesSummary>({
     totalSales: 0,
     totalAmount: 0,
+    totalPaidAmount: 0,
+    outstandingDebt: 0,
+    totalCustomerDebt: 0,
     avgSale: 0,
+
+    paidSalesCount: 0,
+    partialSalesCount: 0,
+    creditSalesCount: 0,
 
     returnsApprovedAmount: 0,
     returnsApprovedCount: 0,
@@ -168,12 +188,14 @@ export default function Reports() {
 
     totalDeductions: 0,
     netAfterDeductions: 0,
+    netCollectedAfterDeductions: 0,
   });
 
   const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
-  const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary>(
-    { total_staff: 0, present_today: 0 }
-  );
+  const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary>({
+    total_staff: 0,
+    present_today: 0,
+  });
 
   const [lowStockProducts, setLowStockProducts] = useState<
     { name: string; quantity_in_stock: number; reorder_level: number }[]
@@ -181,12 +203,10 @@ export default function Reports() {
 
   const [loading, setLoading] = useState(false);
 
-  /** Scope/Contacts for UI + PDF */
   const [company, setCompany] = useState<CompanyRow | null>(null);
   const [branches, setBranches] = useState<BranchRow[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<BranchRow | null>(null);
 
-  /** Branch comparison */
   const [compareRows, setCompareRows] = useState<BranchCompareRow[]>([]);
   const [compareLoading, setCompareLoading] = useState(false);
 
@@ -195,7 +215,6 @@ export default function Reports() {
     return "All branches";
   }, [activeBranchId, selectedBranch?.name]);
 
-  // Load company + branches + selected branch (for correct scope name + PDF contacts)
   const fetchOrgInfo = async () => {
     if (!companyId) {
       setCompany(null);
@@ -205,7 +224,6 @@ export default function Reports() {
     }
 
     try {
-      // cast to any to avoid schema/type drift errors
       const { data: co, error: coErr } = await (supabase as any)
         .from("companies")
         .select("id,name,address,phone,email,logo_url,receipt_footer,tax_id")
@@ -240,21 +258,215 @@ export default function Reports() {
   };
 
   useEffect(() => {
-    fetchOrgInfo();
-    fetchReports();
+    void fetchOrgInfo();
+    void fetchReports();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeBranchId, companyId]);
+
+  /** -----------------------------
+   * Branch comparison (ALL branches only)
+   * ------------------------------*/
+  const fetchBranchComparison = async () => {
+    if (!companyId) return;
+
+    setCompareLoading(true);
+    setCompareRows([]);
+
+    try {
+      const brMap = new Map<string, string>();
+      (branches ?? []).forEach((b) => brMap.set(b.id, b.name));
+
+      const { data: sales, error: salesErr } = await (supabase as any)
+        .from("sales")
+        .select(
+          "branch_id,total_amount,amount_paid,balance_due,created_at,is_returned,company_id,customer_id,status"
+        )
+        .eq("company_id", companyId)
+        .gte("created_at", `${startDate}T00:00:00`)
+        .lte("created_at", `${endDate}T23:59:59`);
+
+      if (salesErr) throw salesErr;
+
+      const { data: returnsRows, error: retErr } = await (supabase as any)
+        .from("returns")
+        .select(
+          `
+          status,
+          quantity,
+          created_at,
+          sale_item:sale_items(
+            unit_price,
+            sale:sales!inner(branch_id,company_id)
+          )
+        `
+        )
+        .gte("created_at", `${startDate}T00:00:00`)
+        .lte("created_at", `${endDate}T23:59:59`)
+        .eq("sale_item.sale.company_id", companyId);
+
+      if (retErr) throw retErr;
+
+      const { data: expRows, error: expErr } = await (supabase as any)
+        .from("expenses")
+        .select("branch_id,amount,status,expense_date,company_id")
+        .eq("company_id", companyId)
+        .eq("status", "approved")
+        .gte("expense_date", startDate)
+        .lte("expense_date", endDate);
+
+      if (expErr) throw expErr;
+
+      const byBranch = new Map<
+        string,
+        {
+          total_sales: number;
+          total_revenue: number;
+          total_paid: number;
+          outstanding_debt: number;
+          approved_returns: number;
+          approved_expenses: number;
+        }
+      >();
+
+      (sales ?? []).forEach((s: any) => {
+        if (!isValidSale(s)) return;
+
+        const bid = String(s?.branch_id || "");
+        if (!bid) return;
+
+        const cur = byBranch.get(bid) || {
+          total_sales: 0,
+          total_revenue: 0,
+          total_paid: 0,
+          outstanding_debt: 0,
+          approved_returns: 0,
+          approved_expenses: 0,
+        };
+
+        cur.total_sales += 1;
+        cur.total_revenue += Number(s?.total_amount || 0);
+        cur.total_paid += Number(s?.amount_paid || 0);
+        cur.outstanding_debt += Math.max(0, Number(s?.balance_due || 0));
+
+        byBranch.set(bid, cur);
+      });
+
+      (returnsRows ?? []).forEach((r: any) => {
+        const status = String(r?.status || "").toLowerCase();
+        if (status !== "approved") return;
+
+        const bid = String(r?.sale_item?.sale?.branch_id || "");
+        if (!bid) return;
+
+        const qty = Number(r?.quantity || 0);
+        const unitPrice = Number(r?.sale_item?.unit_price || 0);
+
+        const cur = byBranch.get(bid) || {
+          total_sales: 0,
+          total_revenue: 0,
+          total_paid: 0,
+          outstanding_debt: 0,
+          approved_returns: 0,
+          approved_expenses: 0,
+        };
+
+        cur.approved_returns += qty * unitPrice;
+        byBranch.set(bid, cur);
+      });
+
+      (expRows ?? []).forEach((e: any) => {
+        const bid = String(e?.branch_id || "");
+        if (!bid) return;
+
+        const cur = byBranch.get(bid) || {
+          total_sales: 0,
+          total_revenue: 0,
+          total_paid: 0,
+          outstanding_debt: 0,
+          approved_returns: 0,
+          approved_expenses: 0,
+        };
+
+        cur.approved_expenses += Number(e?.amount || 0);
+        byBranch.set(bid, cur);
+      });
+
+      const rows: BranchCompareRow[] = Array.from(byBranch.entries())
+        .map(([branch_id, v]) => {
+          const total_deductions = v.approved_returns + v.approved_expenses;
+          return {
+            branch_id,
+            branch_name: brMap.get(branch_id) || "Unknown branch",
+            total_sales: v.total_sales,
+            total_revenue: v.total_revenue,
+            total_paid: v.total_paid,
+            outstanding_debt: v.outstanding_debt,
+            approved_returns: v.approved_returns,
+            approved_expenses: v.approved_expenses,
+            total_deductions,
+            net_after_deductions: v.total_revenue - total_deductions,
+            net_collected_after_deductions: v.total_paid - total_deductions,
+          };
+        })
+        .sort((a, b) => b.net_collected_after_deductions - a.net_collected_after_deductions);
+
+      setCompareRows(rows);
+    } catch (e: any) {
+      console.error(e);
+      toast({
+        title: "Comparison error",
+        description: e?.message || "Failed to load branch comparison",
+        variant: "destructive",
+      });
+    } finally {
+      setCompareLoading(false);
+    }
+  };
 
   /** -----------------------------
    * Core report fetch
    * ------------------------------*/
   const fetchReports = async () => {
+    if (!companyId) {
+      setSalesSummary({
+        totalSales: 0,
+        totalAmount: 0,
+        totalPaidAmount: 0,
+        outstandingDebt: 0,
+        totalCustomerDebt: 0,
+        avgSale: 0,
+        paidSalesCount: 0,
+        partialSalesCount: 0,
+        creditSalesCount: 0,
+        returnsApprovedAmount: 0,
+        returnsApprovedCount: 0,
+        returnsPendingCount: 0,
+        expensesApprovedAmount: 0,
+        expensesApprovedCount: 0,
+        totalDeductions: 0,
+        netAfterDeductions: 0,
+        netCollectedAfterDeductions: 0,
+      });
+      setTopProducts([]);
+      setAttendanceSummary({ total_staff: 0, present_today: 0 });
+      setLowStockProducts([]);
+      setCompareRows([]);
+      return;
+    }
+
     setLoading(true);
 
     setSalesSummary({
       totalSales: 0,
       totalAmount: 0,
+      totalPaidAmount: 0,
+      outstandingDebt: 0,
+      totalCustomerDebt: 0,
       avgSale: 0,
+
+      paidSalesCount: 0,
+      partialSalesCount: 0,
+      creditSalesCount: 0,
 
       returnsApprovedAmount: 0,
       returnsApprovedCount: 0,
@@ -265,6 +477,7 @@ export default function Reports() {
 
       totalDeductions: 0,
       netAfterDeductions: 0,
+      netCollectedAfterDeductions: 0,
     });
 
     setTopProducts([]);
@@ -277,9 +490,12 @@ export default function Reports() {
       /** =========================
        * SALES summary (date range)
        * ========================= */
-      let salesQ = supabase
+      let salesQ = (supabase as any)
         .from("sales")
-        .select("id,total_amount,branch_id,created_at")
+        .select(
+          "id,total_amount,amount_paid,balance_due,payment_status,branch_id,company_id,created_at,is_returned,customer_id,status"
+        )
+        .eq("company_id", companyId)
         .gte("created_at", `${startDate}T00:00:00`)
         .lte("created_at", `${endDate}T23:59:59`);
 
@@ -290,10 +506,28 @@ export default function Reports() {
       const { data: sales, error: salesErr } = await salesQ;
       if (salesErr) throw salesErr;
 
-      const totalAmount = (sales ?? []).reduce(
+      const safeSales = (sales ?? []).filter((s: any) => isValidSale(s));
+
+      const totalAmount = safeSales.reduce(
         (sum: number, s: any) => sum + Number(s.total_amount || 0),
         0
       );
+
+      const totalPaidAmount = safeSales.reduce(
+        (sum: number, s: any) => sum + Number(s.amount_paid || 0),
+        0
+      );
+
+      let paidSalesCount = 0;
+      let partialSalesCount = 0;
+      let creditSalesCount = 0;
+
+      safeSales.forEach((s: any) => {
+        const ps = String(s?.payment_status || "").toLowerCase();
+        if (ps === "paid") paidSalesCount += 1;
+        else if (ps === "partial") partialSalesCount += 1;
+        else if (ps === "credit") creditSalesCount += 1;
+      });
 
       /** =========================
        * RETURNS (approved/pending) in date range
@@ -308,12 +542,13 @@ export default function Reports() {
           created_at,
           sale_item:sale_items(
             unit_price,
-            sale:sales!inner(branch_id)
+            sale:sales!inner(branch_id,company_id)
           )
         `
         )
         .gte("created_at", `${startDate}T00:00:00`)
-        .lte("created_at", `${endDate}T23:59:59`);
+        .lte("created_at", `${endDate}T23:59:59`)
+        .eq("sale_item.sale.company_id", companyId);
 
       if (activeBranchId) {
         returnsBaseQ = returnsBaseQ.eq("sale_item.sale.branch_id", activeBranchId);
@@ -341,16 +576,15 @@ export default function Reports() {
 
       /** =========================
        * EXPENSES (approved only) in date range
-       * - uses expense_date
        * ========================= */
       let expQ = (supabase as any)
         .from("expenses")
         .select("id,amount,branch_id,status,expense_date,company_id")
         .eq("status", "approved")
+        .eq("company_id", companyId)
         .gte("expense_date", startDate)
         .lte("expense_date", endDate);
 
-      if (companyId) expQ = expQ.eq("company_id", companyId);
       if (activeBranchId) expQ = expQ.eq("branch_id", activeBranchId);
 
       const { data: expRows, error: expErr } = await expQ;
@@ -362,16 +596,36 @@ export default function Reports() {
       );
       const expensesApprovedCount = (expRows ?? []).length;
 
-      const totalSales = (sales ?? []).length;
+      const totalSales = safeSales.length;
       const avgSale = totalSales > 0 ? totalAmount / totalSales : 0;
+
+      const outstandingDebt = safeSales.reduce((sum: number, s: any) => {
+        const balance = Number(s?.balance_due || 0);
+        return sum + (balance > 0 ? balance : 0);
+      }, 0);
+
+      const totalCustomerDebt = safeSales.reduce((sum: number, s: any) => {
+        const hasCustomer = !!String(s?.customer_id || "").trim();
+        const balance = Number(s?.balance_due || 0);
+        if (!hasCustomer || balance <= 0) return sum;
+        return sum + balance;
+      }, 0);
 
       const totalDeductions = returnsApprovedAmount + expensesApprovedAmount;
       const netAfterDeductions = totalAmount - totalDeductions;
+      const netCollectedAfterDeductions = totalPaidAmount - totalDeductions;
 
       setSalesSummary({
         totalSales,
         totalAmount,
+        totalPaidAmount,
+        outstandingDebt,
+        totalCustomerDebt,
         avgSale,
+
+        paidSalesCount,
+        partialSalesCount,
+        creditSalesCount,
 
         returnsApprovedAmount,
         returnsApprovedCount,
@@ -382,14 +636,13 @@ export default function Reports() {
 
         totalDeductions,
         netAfterDeductions,
+        netCollectedAfterDeductions,
       });
 
       /** =========================
        * Top products (last 30 days)
        * ========================= */
-      const thirtyDaysAgo = new Date(
-        Date.now() - 30 * 24 * 60 * 60 * 1000
-      ).toISOString();
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
       let saleItemsQ = (supabase as any)
         .from("sale_items")
@@ -397,11 +650,12 @@ export default function Reports() {
           `
           quantity,
           unit_price,
-          product:products(name),
-          sale:sales!inner(branch_id)
+          product:products(name,company_id),
+          sale:sales!inner(branch_id,company_id,is_returned,status)
         `
         )
-        .gte("created_at", thirtyDaysAgo);
+        .gte("created_at", thirtyDaysAgo)
+        .eq("sale.company_id", companyId);
 
       if (activeBranchId) {
         saleItemsQ = saleItemsQ.eq("sale.branch_id", activeBranchId);
@@ -411,17 +665,16 @@ export default function Reports() {
       if (itemsErr) throw itemsErr;
 
       if (saleItems) {
-        const productMap = new Map<
-          string,
-          { total_qty: number; total_revenue: number }
-        >();
+        const productMap = new Map<string, { total_qty: number; total_revenue: number }>();
 
         saleItems.forEach((item: any) => {
+          if (!isValidSale(item?.sale)) return;
+
           const name = item?.product?.name || "Unknown";
           const qty = Number(item?.quantity || 0);
           const price = Number(item?.unit_price || 0);
-          const existing =
-            productMap.get(name) || { total_qty: 0, total_revenue: 0 };
+          const existing = productMap.get(name) || { total_qty: 0, total_revenue: 0 };
+
           productMap.set(name, {
             total_qty: existing.total_qty + qty,
             total_revenue: existing.total_revenue + qty * price,
@@ -439,17 +692,18 @@ export default function Reports() {
       /** =========================
        * Attendance today
        * ========================= */
-      let staffQ = supabase
+      let staffQ = (supabase as any)
         .from("profiles")
         .select("*", { count: "exact", head: true })
-        .filter("deleted_at", "is", null as any);
+        .eq("company_id", companyId)
+        .filter("deleted_at", "is", null);
 
       if (activeBranchId) staffQ = staffQ.eq("branch_id", activeBranchId);
 
       const { count: totalStaff, error: staffErr } = await staffQ;
       if (staffErr) throw staffErr;
 
-      let presentQ = supabase
+      let presentQ = (supabase as any)
         .from("attendance")
         .select("*", { count: "exact", head: true })
         .eq("date", today);
@@ -467,9 +721,10 @@ export default function Reports() {
       /** =========================
        * Low stock
        * ========================= */
-      let lowStockQ = supabase
+      let lowStockQ = (supabase as any)
         .from("products")
         .select("name, quantity_in_stock, reorder_level")
+        .eq("company_id", companyId)
         .lt("quantity_in_stock", 10)
         .order("quantity_in_stock", { ascending: true })
         .limit(10);
@@ -480,6 +735,12 @@ export default function Reports() {
       if (lowErr) throw lowErr;
 
       setLowStockProducts(lowStock || []);
+
+      if (!activeBranchId) {
+        await fetchBranchComparison();
+      } else {
+        setCompareRows([]);
+      }
     } catch (error: any) {
       console.error("Error fetching reports:", error);
       toast({
@@ -493,151 +754,7 @@ export default function Reports() {
   };
 
   /** -----------------------------
-   * Branch comparison (ALL branches only)
-   * ------------------------------*/
-  const fetchBranchComparison = async () => {
-    if (!companyId) return;
-
-    setCompareLoading(true);
-    setCompareRows([]);
-
-    try {
-      const brMap = new Map<string, string>();
-      (branches ?? []).forEach((b) => brMap.set(b.id, b.name));
-
-      // sales in range (all branches)
-      const { data: sales, error: salesErr } = await supabase
-        .from("sales")
-        .select("branch_id,total_amount,created_at")
-        .gte("created_at", `${startDate}T00:00:00`)
-        .lte("created_at", `${endDate}T23:59:59`);
-
-      if (salesErr) throw salesErr;
-
-      // returns in range (approved only)
-      const { data: returnsRows, error: retErr } = await (supabase as any)
-        .from("returns")
-        .select(
-          `
-          status,
-          quantity,
-          created_at,
-          sale_item:sale_items(
-            unit_price,
-            sale:sales!inner(branch_id)
-          )
-        `
-        )
-        .gte("created_at", `${startDate}T00:00:00`)
-        .lte("created_at", `${endDate}T23:59:59`);
-
-      if (retErr) throw retErr;
-
-      // expenses in range (approved only)
-      const { data: expRows, error: expErr } = await (supabase as any)
-        .from("expenses")
-        .select("branch_id,amount,status,expense_date,company_id")
-        .eq("company_id", companyId)
-        .eq("status", "approved")
-        .gte("expense_date", startDate)
-        .lte("expense_date", endDate);
-
-      if (expErr) throw expErr;
-
-      const byBranch = new Map<
-        string,
-        {
-          total_sales: number;
-          total_revenue: number;
-          approved_returns: number;
-          approved_expenses: number;
-        }
-      >();
-
-      (sales ?? []).forEach((s: any) => {
-        const bid = String(s?.branch_id || "");
-        if (!bid) return;
-
-        const cur = byBranch.get(bid) || {
-          total_sales: 0,
-          total_revenue: 0,
-          approved_returns: 0,
-          approved_expenses: 0,
-        };
-
-        cur.total_sales += 1;
-        cur.total_revenue += Number(s?.total_amount || 0);
-
-        byBranch.set(bid, cur);
-      });
-
-      (returnsRows ?? []).forEach((r: any) => {
-        const status = String(r?.status || "").toLowerCase();
-        if (status !== "approved") return;
-
-        const bid = String(r?.sale_item?.sale?.branch_id || "");
-        if (!bid) return;
-
-        const qty = Number(r?.quantity || 0);
-        const unitPrice = Number(r?.sale_item?.unit_price || 0);
-
-        const cur = byBranch.get(bid) || {
-          total_sales: 0,
-          total_revenue: 0,
-          approved_returns: 0,
-          approved_expenses: 0,
-        };
-
-        cur.approved_returns += qty * unitPrice;
-        byBranch.set(bid, cur);
-      });
-
-      (expRows ?? []).forEach((e: any) => {
-        const bid = String(e?.branch_id || "");
-        if (!bid) return;
-
-        const cur = byBranch.get(bid) || {
-          total_sales: 0,
-          total_revenue: 0,
-          approved_returns: 0,
-          approved_expenses: 0,
-        };
-
-        cur.approved_expenses += Number(e?.amount || 0);
-        byBranch.set(bid, cur);
-      });
-
-      const rows: BranchCompareRow[] = Array.from(byBranch.entries())
-        .map(([branch_id, v]) => {
-          const total_deductions = v.approved_returns + v.approved_expenses;
-          return {
-            branch_id,
-            branch_name: brMap.get(branch_id) || "Unknown branch",
-            total_sales: v.total_sales,
-            total_revenue: v.total_revenue,
-            approved_returns: v.approved_returns,
-            approved_expenses: v.approved_expenses,
-            total_deductions,
-            net_after_deductions: v.total_revenue - total_deductions,
-          };
-        })
-        .sort((a, b) => b.net_after_deductions - a.net_after_deductions);
-
-      setCompareRows(rows);
-    } catch (e: any) {
-      console.error(e);
-      toast({
-        title: "Comparison error",
-        description: e?.message || "Failed to load branch comparison",
-        variant: "destructive",
-      });
-    } finally {
-      setCompareLoading(false);
-    }
-  };
-
-  /** -----------------------------
-   * PDF Export (MATCH Attendance/Expenses format ✅ + LOGO ✅)
+   * PDF Export
    * ------------------------------*/
   const openPdfWindow = (html: string) => {
     const win = window.open("", "_blank");
@@ -658,7 +775,7 @@ export default function Reports() {
     <style>
       :root { --border:#e5e7eb; --muted:#6b7280; --text:#111827; --soft:#f9fafb; }
       body { font-family: Arial, sans-serif; padding: 18px; color: var(--text); }
-      .paper { max-width: 980px; margin: 0 auto; }
+      .paper { max-width: 1100px; margin: 0 auto; }
       .printBtn { margin-bottom: 12px; }
 
       .header {
@@ -681,7 +798,7 @@ export default function Reports() {
 
       .cards { display:flex; gap:10px; flex-wrap:wrap; margin: 12px 0 10px; }
       .kpi {
-        flex: 1 1 180px;
+        flex: 1 1 200px;
         border: 1px solid var(--border);
         border-radius: 12px;
         padding: 10px 12px;
@@ -727,7 +844,7 @@ export default function Reports() {
     const initials = companyInitials(co);
 
     const scopeLine = activeBranchId
-      ? (selectedBranch?.name || "Selected Branch")
+      ? selectedBranch?.name || "Selected Branch"
       : "All Branches";
 
     const logoHtml = logoDataUrl
@@ -755,11 +872,6 @@ export default function Reports() {
     `;
   };
 
-  /**
-   * ✅ MATCH your Attendance rule:
-   * - If ALL branches: show one "Company Contacts" only (no branch listing)
-   * - If selected branch: show only that branch contact
-   */
   const buildPdfContactsHtml = () => {
     const coName = (company?.name || companyName || "Company") as string;
 
@@ -791,10 +903,7 @@ export default function Reports() {
   };
 
   const exportReportPdf = async () => {
-    const coName = (company?.name || companyName || "Company") as string;
-
     try {
-      // ✅ embed logo for reliable printing
       const logoDataUrl = await urlToDataUrl(companyLogoUrl || company?.logo_url || null);
 
       const title = "Reports & Analytics";
@@ -837,8 +946,10 @@ export default function Reports() {
                     <th>Branch</th>
                     <th class="right">Sales</th>
                     <th class="right">Revenue</th>
+                    <th class="right">Paid</th>
+                    <th class="right">Debt</th>
                     <th class="right">Deductions</th>
-                    <th class="right">Net</th>
+                    <th class="right">Net Collected</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -856,8 +967,10 @@ export default function Reports() {
                           </td>
                           <td class="right">${escapeHtml(r.total_sales)}</td>
                           <td class="right">GHC ${escapeHtml(money(r.total_revenue))}</td>
+                          <td class="right">GHC ${escapeHtml(money(r.total_paid))}</td>
+                          <td class="right">GHC ${escapeHtml(money(r.outstanding_debt))}</td>
                           <td class="right">GHC ${escapeHtml(money(r.total_deductions))}</td>
-                          <td class="right">GHC ${escapeHtml(money(r.net_after_deductions))}</td>
+                          <td class="right">GHC ${escapeHtml(money(r.net_collected_after_deductions))}</td>
                         </tr>
                       `
                     )
@@ -885,11 +998,15 @@ export default function Reports() {
                 <div class="box">
                   <div class="boxTitle">Notes</div>
                   <div class="muted" style="font-size:12px; line-height:1.5;">
+                    <div>• Gross revenue = full value of valid sales</div>
+                    <div>• Collected = amount actually paid by customers</div>
+                    <div>• Outstanding debt = unpaid balances still owed</div>
+                    <div>• Customer debt = balances linked to customers only</div>
                     <div>• Total deductions = Approved returns + Approved expenses</div>
-                    <div>• Net revenue = Total revenue − Total deductions</div>
+                    <div>• Net collected after deductions = collected money − deductions</div>
                     <div style="margin-top:6px;">
-                      Breakdown: returns GHC ${escapeHtml(money(salesSummary.returnsApprovedAmount))}
-                      • expenses GHC ${escapeHtml(money(salesSummary.expensesApprovedAmount))}
+                      Returns: GHC ${escapeHtml(money(salesSummary.returnsApprovedAmount))} •
+                      Expenses: GHC ${escapeHtml(money(salesSummary.expensesApprovedAmount))}
                     </div>
                   </div>
                 </div>
@@ -902,23 +1019,40 @@ export default function Reports() {
                   <div class="small">transactions</div>
                 </div>
                 <div class="kpi">
-                  <div class="label">Total Revenue</div>
+                  <div class="label">Gross Revenue</div>
                   <div class="value">GHC ${escapeHtml(money(salesSummary.totalAmount))}</div>
-                  <div class="small">gross revenue</div>
+                  <div class="small">full value of valid sales</div>
+                </div>
+                <div class="kpi">
+                  <div class="label">Collected</div>
+                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalPaidAmount))}</div>
+                  <div class="small">
+                    Paid: ${escapeHtml(salesSummary.paidSalesCount)} • Partial: ${escapeHtml(
+        salesSummary.partialSalesCount
+      )} • Credit: ${escapeHtml(salesSummary.creditSalesCount)}
+                  </div>
+                </div>
+                <div class="kpi">
+                  <div class="label">Outstanding Debt</div>
+                  <div class="value">GHC ${escapeHtml(money(salesSummary.outstandingDebt))}</div>
+                  <div class="small">all valid unpaid balances</div>
+                </div>
+                <div class="kpi">
+                  <div class="label">Customer Debt</div>
+                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalCustomerDebt))}</div>
+                  <div class="small">customer balances only</div>
                 </div>
                 <div class="kpi">
                   <div class="label">Total Deductions</div>
                   <div class="value">GHC ${escapeHtml(money(salesSummary.totalDeductions))}</div>
-                  <div class="small">
-                    ${escapeHtml(
-                      `${salesSummary.returnsApprovedCount} returns approved • ${salesSummary.returnsPendingCount} pending • ${salesSummary.expensesApprovedCount} expenses approved`
-                    )}
-                  </div>
+                  <div class="small">returns + expenses</div>
                 </div>
                 <div class="kpi">
-                  <div class="label">Net After Deductions</div>
-                  <div class="value">GHC ${escapeHtml(money(salesSummary.netAfterDeductions))}</div>
-                  <div class="small">revenue − deductions</div>
+                  <div class="label">Net Collected After Deductions</div>
+                  <div class="value">GHC ${escapeHtml(
+                    money(salesSummary.netCollectedAfterDeductions)
+                  )}</div>
+                  <div class="small">actual collected cash − deductions</div>
                 </div>
               </div>
 
@@ -1014,8 +1148,7 @@ export default function Reports() {
         <div>
           <h1 className="text-2xl font-bold text-white">Reports & Analytics</h1>
           <p className="text-slate-400">
-            Business insights and summaries{" "}
-            <span className="text-slate-500">• {scopeLabel}</span>
+            Business insights and summaries <span className="text-slate-500">• {scopeLabel}</span>
           </p>
         </div>
 
@@ -1026,7 +1159,6 @@ export default function Reports() {
         </div>
       </div>
 
-      {/* Date Filter */}
       <Card className="bg-slate-800/50 border-slate-700">
         <CardContent className="pt-6">
           <div className="flex flex-col sm:flex-row gap-4 items-end">
@@ -1048,22 +1180,15 @@ export default function Reports() {
                 className="bg-slate-700 border-slate-600 text-white"
               />
             </div>
-            <Button
-              onClick={async () => {
-                await fetchReports();
-                if (!activeBranchId) await fetchBranchComparison();
-              }}
-              disabled={loading}
-            >
+            <Button onClick={() => void fetchReports()} disabled={loading}>
               {loading ? "Loading..." : "Generate Report"}
             </Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* Summary Cards (clean accounting flow) */}
       <div className="bg-slate-800/20 border border-slate-700 rounded-xl p-3">
-        <div className="flex gap-4 overflow-x-auto pb-2 snap-x snap-mandatory lg:grid lg:grid-cols-3 xl:grid-cols-6 lg:overflow-visible">
+        <div className="flex gap-4 overflow-x-auto pb-2 snap-x snap-mandatory lg:grid lg:grid-cols-4 2xl:grid-cols-9 lg:overflow-visible">
           <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-slate-400">
@@ -1072,9 +1197,7 @@ export default function Reports() {
               <BarChart3 className="h-5 w-5 text-blue-500" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold text-white">
-                {salesSummary.totalSales}
-              </div>
+              <div className="text-2xl font-bold text-white">{salesSummary.totalSales}</div>
               <p className="text-xs text-slate-400">transactions</p>
             </CardContent>
           </Card>
@@ -1082,7 +1205,7 @@ export default function Reports() {
           <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-slate-400">
-                Total Revenue
+                Gross Revenue
               </CardTitle>
               <TrendingUp className="h-5 w-5 text-green-500" />
             </CardHeader>
@@ -1090,7 +1213,55 @@ export default function Reports() {
               <div className="text-2xl font-bold text-white">
                 GHC {money(salesSummary.totalAmount)}
               </div>
-              <p className="text-xs text-slate-400">gross revenue</p>
+              <p className="text-xs text-slate-400">full value of valid sales</p>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Total Paid
+              </CardTitle>
+              <Wallet className="h-5 w-5 text-emerald-500" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-white">
+                GHC {money(salesSummary.totalPaidAmount)}
+              </div>
+              <p className="text-xs text-slate-400">
+                paid {salesSummary.paidSalesCount} • partial {salesSummary.partialSalesCount} •
+                credit {salesSummary.creditSalesCount}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Outstanding Debt
+              </CardTitle>
+              <Wallet className="h-5 w-5 text-yellow-400" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-yellow-300">
+                GHC {money(salesSummary.outstandingDebt)}
+              </div>
+              <p className="text-xs text-slate-400">all valid unpaid balances</p>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium text-slate-400">
+                Customer Debt
+              </CardTitle>
+              <Wallet className="h-5 w-5 text-rose-400" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold text-rose-300">
+                GHC {money(salesSummary.totalCustomerDebt)}
+              </div>
+              <p className="text-xs text-slate-400">customer balances only</p>
             </CardContent>
           </Card>
 
@@ -1151,15 +1322,15 @@ export default function Reports() {
           <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-slate-400">
-                Net After Deductions
+                Net Collected After Deductions
               </CardTitle>
-              <TrendingUp className="h-5 w-5 text-emerald-500" />
+              <TrendingUp className="h-5 w-5 text-cyan-400" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.netAfterDeductions)}
+                GHC {money(salesSummary.netCollectedAfterDeductions)}
               </div>
-              <p className="text-xs text-slate-400">revenue − deductions</p>
+              <p className="text-xs text-slate-400">actual collected cash − deductions</p>
             </CardContent>
           </Card>
         </div>
@@ -1169,7 +1340,6 @@ export default function Reports() {
         </div>
       </div>
 
-      {/* Branch comparison (ALL branches only) */}
       {!activeBranchId && (
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader className="flex items-center justify-between">
@@ -1177,25 +1347,21 @@ export default function Reports() {
               <TrendingUp className="h-5 w-5" />
               Branch Comparison (Selected period)
             </CardTitle>
-            <Button
-              variant="outline"
-              onClick={fetchBranchComparison}
-              disabled={compareLoading}
-            >
+            <Button variant="outline" onClick={() => void fetchBranchComparison()} disabled={compareLoading}>
               {compareLoading ? "Loading..." : "Refresh"}
             </Button>
           </CardHeader>
-          <CardContent className="p-0">
+          <CardContent className="p-0 overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow className="border-slate-700">
                   <TableHead className="text-slate-400">Branch</TableHead>
                   <TableHead className="text-slate-400 text-right">Sales</TableHead>
                   <TableHead className="text-slate-400 text-right">Revenue</TableHead>
-                  <TableHead className="text-slate-400 text-right">
-                    Deductions
-                  </TableHead>
-                  <TableHead className="text-slate-400 text-right">Net</TableHead>
+                  <TableHead className="text-slate-400 text-right">Paid</TableHead>
+                  <TableHead className="text-slate-400 text-right">Debt</TableHead>
+                  <TableHead className="text-slate-400 text-right">Deductions</TableHead>
+                  <TableHead className="text-slate-400 text-right">Net Collected</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1208,27 +1374,28 @@ export default function Reports() {
                         {money(r.approved_expenses)}
                       </div>
                     </TableCell>
-                    <TableCell className="text-slate-300 text-right">
-                      {r.total_sales}
-                    </TableCell>
+                    <TableCell className="text-slate-300 text-right">{r.total_sales}</TableCell>
                     <TableCell className="text-slate-300 text-right">
                       GHC {money(r.total_revenue)}
+                    </TableCell>
+                    <TableCell className="text-slate-300 text-right">
+                      GHC {money(r.total_paid)}
+                    </TableCell>
+                    <TableCell className="text-yellow-300 text-right">
+                      GHC {money(r.outstanding_debt)}
                     </TableCell>
                     <TableCell className="text-slate-300 text-right">
                       GHC {money(r.total_deductions)}
                     </TableCell>
                     <TableCell className="text-slate-300 text-right">
-                      GHC {money(r.net_after_deductions)}
+                      GHC {money(r.net_collected_after_deductions)}
                     </TableCell>
                   </TableRow>
                 ))}
 
                 {compareRows.length === 0 && (
                   <TableRow>
-                    <TableCell
-                      colSpan={5}
-                      className="text-center text-slate-400 py-6"
-                    >
+                    <TableCell colSpan={7} className="text-center text-slate-400 py-6">
                       No data available for selected period.
                     </TableCell>
                   </TableRow>
@@ -1240,7 +1407,6 @@ export default function Reports() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-2">
-        {/* Top Products */}
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader>
             <CardTitle className="text-white flex items-center gap-2">
@@ -1253,12 +1419,8 @@ export default function Reports() {
               <TableHeader>
                 <TableRow className="border-slate-700">
                   <TableHead className="text-slate-400">Product</TableHead>
-                  <TableHead className="text-slate-400 text-right">
-                    Qty Sold
-                  </TableHead>
-                  <TableHead className="text-slate-400 text-right">
-                    Revenue
-                  </TableHead>
+                  <TableHead className="text-slate-400 text-right">Qty Sold</TableHead>
+                  <TableHead className="text-slate-400 text-right">Revenue</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1276,10 +1438,7 @@ export default function Reports() {
 
                 {topProducts.length === 0 && (
                   <TableRow>
-                    <TableCell
-                      colSpan={3}
-                      className="text-center text-slate-400 py-6"
-                    >
+                    <TableCell colSpan={3} className="text-center text-slate-400 py-6">
                       No sales data available
                     </TableCell>
                   </TableRow>
@@ -1289,7 +1448,6 @@ export default function Reports() {
           </CardContent>
         </Card>
 
-        {/* Low Stock Alert */}
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader>
             <CardTitle className="text-white flex items-center gap-2">
@@ -1302,12 +1460,8 @@ export default function Reports() {
               <TableHeader>
                 <TableRow className="border-slate-700">
                   <TableHead className="text-slate-400">Product</TableHead>
-                  <TableHead className="text-slate-400 text-right">
-                    In Stock
-                  </TableHead>
-                  <TableHead className="text-slate-400 text-right">
-                    Reorder At
-                  </TableHead>
+                  <TableHead className="text-slate-400 text-right">In Stock</TableHead>
+                  <TableHead className="text-slate-400 text-right">Reorder At</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1325,10 +1479,7 @@ export default function Reports() {
 
                 {lowStockProducts.length === 0 && (
                   <TableRow>
-                    <TableCell
-                      colSpan={3}
-                      className="text-center text-slate-400 py-6"
-                    >
+                    <TableCell colSpan={3} className="text-center text-slate-400 py-6">
                       All products are well stocked
                     </TableCell>
                   </TableRow>
@@ -1339,7 +1490,6 @@ export default function Reports() {
         </Card>
       </div>
 
-      {/* Attendance small note */}
       <div className="text-sm text-slate-500">
         Attendance today:{" "}
         <span className="text-slate-300 font-medium">

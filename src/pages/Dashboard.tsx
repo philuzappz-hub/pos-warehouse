@@ -3,12 +3,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import {
+  BadgeDollarSign,
   ClipboardCheck,
   ClipboardList,
   Clock,
   FileText,
   Package,
   TrendingUp,
+  Users,
+  Wallet,
   Warehouse,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -30,6 +33,13 @@ interface DashboardStats {
 
   pendingStockReceipts: number; // admin
   myPendingReceipts: number; // warehouse user
+
+  // ✅ debt / payment visibility
+  outstandingDebt: number;
+  customersOwing: number;
+  unpaidCreditSales: number;
+  cashCollectedToday: number;
+  creditSoldToday: number;
 }
 
 type BranchRow = {
@@ -48,10 +58,11 @@ type BranchBreakdownRow = {
   lowStock: number;
   pendingStockReceipts: number;
   todayAttendance: number;
+  outstandingDebt: number;
+  customersOwing: number;
 };
 
 function makeBranchCode(name: string) {
-  // e.g. "Walewale Branch" -> "WALE" + random 3 digits => "WALE-472"
   const base = name
     .trim()
     .toUpperCase()
@@ -71,12 +82,18 @@ function applyBranchScope(query: any, branchId: string | null) {
   return query.eq("branch_id", branchId);
 }
 
+function money(n: number) {
+  return Number(n || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 export default function Dashboard() {
   const { user, profile, roles, isAdmin, activeBranchId } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // ✅ fixes TS “Type instantiation is excessively deep”
   const sb = supabase as any;
 
   const [stats, setStats] = useState<DashboardStats>({
@@ -87,40 +104,37 @@ export default function Dashboard() {
     todayAttendance: 0,
     pendingStockReceipts: 0,
     myPendingReceipts: 0,
+
+    outstandingDebt: 0,
+    customersOwing: 0,
+    unpaidCreditSales: 0,
+    cashCollectedToday: 0,
+    creditSoldToday: 0,
   });
 
   const [loading, setLoading] = useState(true);
 
-  // Branch UI state (Admin only)
   const [branches, setBranches] = useState<BranchRow[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [creatingBranch, setCreatingBranch] = useState(false);
   const [newBranchName, setNewBranchName] = useState("");
 
-  // ✅ Admin-only: branch breakdown when All branches selected
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [branchBreakdown, setBranchBreakdown] = useState<BranchBreakdownRow[]>([]);
 
   const isCashier = useMemo(() => roles.includes("cashier" as any), [roles]);
   const isWarehouse = useMemo(() => roles.includes("warehouse" as any), [roles]);
 
-  /**
-   * ✅ IMPORTANT:
-   * Admin should NOT automatically see Cashier/Warehouse features.
-   * Admin sees only Admin features.
-   * (If you ever want admin to also do cashier/warehouse work, assign BOTH roles.)
-   */
   const canSeeDailySales = isCashier;
   const canSeeStockBalance = isWarehouse;
   const canSeeStockApprovals = isAdmin;
+  const canSeeDebtWidgets = isAdmin || isCashier;
 
-  // ✅ refresh stats when branch changes (for admin)
   useEffect(() => {
     fetchStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, isWarehouse, isCashier, user?.id, activeBranchId]);
+  }, [isAdmin, isWarehouse, isCashier, user?.id, activeBranchId, profile?.company_id]);
 
-  // ✅ Load branches (Admin only)
   useEffect(() => {
     if (!isAdmin) return;
     if (!profile?.company_id) return;
@@ -128,7 +142,6 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, profile?.company_id]);
 
-  // ✅ If Admin is viewing ALL branches, load per-branch breakdown
   useEffect(() => {
     if (!isAdmin) return;
     if (!profile?.company_id) return;
@@ -226,6 +239,7 @@ export default function Dashboard() {
   const fetchBranchBreakdown = async () => {
     if (!isAdmin) return;
     if (!branches.length) return;
+    if (!profile?.company_id) return;
 
     setBreakdownLoading(true);
     try {
@@ -233,7 +247,13 @@ export default function Dashboard() {
 
       const rows = await Promise.all(
         branches.map(async (b) => {
-          const [productsRes, lowStockRes, receiptsRes, attendanceRes] = await Promise.all([
+          const [
+            productsRes,
+            lowStockRes,
+            receiptsRes,
+            attendanceRes,
+            debtSalesRes,
+          ] = await Promise.all([
             sb.from("products").select("id", { count: "exact", head: true }).eq("branch_id", b.id),
 
             sb
@@ -253,7 +273,23 @@ export default function Dashboard() {
               .select("id", { count: "exact", head: true })
               .eq("branch_id", b.id)
               .eq("date", today),
+
+            sb
+              .from("sales")
+              .select("customer_id,balance_due")
+              .eq("company_id", profile.company_id)
+              .eq("branch_id", b.id)
+              .gt("balance_due", 0),
           ]);
+
+          const debtRows = (debtSalesRes?.data ?? []) as any[];
+          const outstandingDebt = debtRows.reduce(
+            (sum: number, r: any) => sum + Number(r?.balance_due || 0),
+            0
+          );
+          const owingCustomers = new Set(
+            debtRows.map((r: any) => String(r?.customer_id || "")).filter(Boolean)
+          );
 
           return {
             branchId: b.id,
@@ -262,6 +298,8 @@ export default function Dashboard() {
             lowStock: Number(lowStockRes?.count ?? 0),
             pendingStockReceipts: Number(receiptsRes?.count ?? 0),
             todayAttendance: Number(attendanceRes?.count ?? 0),
+            outstandingDebt,
+            customersOwing: owingCustomers.size,
           } as BranchBreakdownRow;
         })
       );
@@ -279,13 +317,15 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const today = new Date().toISOString().split("T")[0];
+      const companyId = profile?.company_id ?? null;
 
-      // Sales stats should be cashier-only (branch-scoped by RLS / cashier context)
       const salesPromise = isCashier
-        ? sb.from("sales").select("total_amount").gte("created_at", today)
+        ? applyBranchScope(
+            sb.from("sales").select("total_amount").gte("created_at", `${today}T00:00:00`),
+            activeBranchId
+          )
         : Promise.resolve({ data: [] as any[] } as any);
 
-      // Admin inventory stats -> branch-aware for selected branch
       const totalProductsPromise = isAdmin
         ? applyBranchScope(sb.from("products").select("id", { count: "exact", head: true }), activeBranchId)
         : Promise.resolve({ count: 0 } as any);
@@ -300,7 +340,6 @@ export default function Dashboard() {
           )
         : Promise.resolve({ count: 0 } as any);
 
-      // Warehouse pending orders (leave as you had it)
       const pendingOrdersPromise = isWarehouse
         ? sb
             .from("sale_coupons")
@@ -316,7 +355,6 @@ export default function Dashboard() {
             .eq("sales.status", "pending")
         : Promise.resolve({ count: 0 } as any);
 
-      // Attendance admin-only -> branch-aware
       const attendancePromise = isAdmin
         ? applyBranchScope(
             sb.from("attendance").select("id", { count: "exact", head: true }).eq("date", today),
@@ -324,7 +362,6 @@ export default function Dashboard() {
           )
         : Promise.resolve({ count: 0 } as any);
 
-      // Stock receipts approvals admin-only -> branch-aware
       const pendingStockReceiptsPromise = isAdmin
         ? applyBranchScope(
             sb.from("warehouse_receipts").select("id", { count: "exact", head: true }).eq("status", "pending"),
@@ -332,7 +369,6 @@ export default function Dashboard() {
           )
         : Promise.resolve({ count: 0 } as any);
 
-      // My pending receipts warehouse-only
       const myPendingReceiptsPromise =
         isWarehouse && user?.id
           ? sb
@@ -342,6 +378,31 @@ export default function Dashboard() {
               .eq("created_by", user.id)
           : Promise.resolve({ count: 0 } as any);
 
+      const outstandingDebtPromise =
+        canSeeDebtWidgets && companyId
+          ? applyBranchScope(
+              sb
+                .from("sales")
+                .select("customer_id,balance_due,payment_status,amount_paid,created_at")
+                .eq("company_id", companyId)
+                .gt("balance_due", 0),
+              activeBranchId
+            )
+          : Promise.resolve({ data: [] as any[] } as any);
+
+      const todayPaymentFlowPromise =
+        canSeeDebtWidgets && companyId
+          ? applyBranchScope(
+              sb
+                .from("sales")
+                .select("total_amount,amount_paid,balance_due,payment_status,created_at")
+                .eq("company_id", companyId)
+                .gte("created_at", `${today}T00:00:00`)
+                .lte("created_at", `${today}T23:59:59`),
+              activeBranchId
+            )
+          : Promise.resolve({ data: [] as any[] } as any);
+
       const [
         salesRes,
         productsRes,
@@ -350,6 +411,8 @@ export default function Dashboard() {
         attendanceRes,
         pendingStockReceiptsRes,
         myPendingReceiptsRes,
+        debtRes,
+        todayFlowRes,
       ] = await Promise.all([
         salesPromise,
         totalProductsPromise,
@@ -358,6 +421,8 @@ export default function Dashboard() {
         attendancePromise,
         pendingStockReceiptsPromise,
         myPendingReceiptsPromise,
+        outstandingDebtPromise,
+        todayPaymentFlowPromise,
       ]);
 
       const todaySales =
@@ -365,6 +430,26 @@ export default function Dashboard() {
           (sum: number, s: any) => sum + Number(s?.total_amount ?? 0),
           0
         ) || 0;
+
+      const debtRows = ((debtRes as any)?.data ?? []) as any[];
+      const outstandingDebt = debtRows.reduce(
+        (sum: number, s: any) => sum + Number(s?.balance_due ?? 0),
+        0
+      );
+      const customersOwing = new Set(
+        debtRows.map((s: any) => String(s?.customer_id || "")).filter(Boolean)
+      ).size;
+      const unpaidCreditSales = debtRows.length;
+
+      const todayFlowRows = ((todayFlowRes as any)?.data ?? []) as any[];
+      const cashCollectedToday = todayFlowRows.reduce(
+        (sum: number, s: any) => sum + Number(s?.amount_paid ?? 0),
+        0
+      );
+      const creditSoldToday = todayFlowRows.reduce(
+        (sum: number, s: any) => sum + Number(s?.balance_due ?? 0),
+        0
+      );
 
       setStats({
         todaySales,
@@ -374,6 +459,12 @@ export default function Dashboard() {
         todayAttendance: Number(attendanceRes?.count ?? 0),
         pendingStockReceipts: Number(pendingStockReceiptsRes?.count ?? 0),
         myPendingReceipts: Number(myPendingReceiptsRes?.count ?? 0),
+
+        outstandingDebt,
+        customersOwing,
+        unpaidCreditSales,
+        cashCollectedToday,
+        creditSoldToday,
       });
     } catch (error) {
       console.error("Error fetching stats:", error);
@@ -385,11 +476,51 @@ export default function Dashboard() {
   const statCards = [
     {
       title: "Today's Sales",
-      value: `GHS ${stats.todaySales.toLocaleString()}`,
+      value: `GHS ${money(stats.todaySales)}`,
       icon: TrendingUp,
       color: "text-green-500",
       roles: ["cashier"],
       onClick: () => navigate("/pos"),
+    },
+    {
+      title: "Cash Collected Today",
+      value: `GHS ${money(stats.cashCollectedToday)}`,
+      icon: BadgeDollarSign,
+      color: "text-emerald-400",
+      roles: ["admin", "cashier"],
+      onClick: () => navigate("/customer-payments"),
+    },
+    {
+      title: "Credit Sold Today",
+      value: `GHS ${money(stats.creditSoldToday)}`,
+      icon: Wallet,
+      color: "text-amber-400",
+      roles: ["admin", "cashier"],
+      onClick: () => navigate("/customer-payments"),
+    },
+    {
+      title: "Outstanding Debt",
+      value: `GHS ${money(stats.outstandingDebt)}`,
+      icon: Wallet,
+      color: "text-yellow-500",
+      roles: ["admin", "cashier"],
+      onClick: () => navigate("/customer-payments"),
+    },
+    {
+      title: "Customers Owing",
+      value: stats.customersOwing,
+      icon: Users,
+      color: "text-orange-400",
+      roles: ["admin", "cashier"],
+      onClick: () => navigate("/customer-payments"),
+    },
+    {
+      title: "Unpaid Credit Sales",
+      value: stats.unpaidCreditSales,
+      icon: FileText,
+      color: "text-red-400",
+      roles: ["admin", "cashier"],
+      onClick: () => navigate("/customer-payments"),
     },
     {
       title: "Total Products",
@@ -441,7 +572,6 @@ export default function Dashboard() {
     },
   ];
 
-  // Admin sees only admin cards; non-admin sees by role
   const visibleCards = statCards.filter((card) => {
     if (isAdmin) return card.roles.includes("admin");
     return card.roles.some((role) => roles.includes(role as any));
@@ -483,7 +613,63 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* ✅ ADMIN ONLY: when viewing ALL branches show a breakdown so branches are distinguished */}
+      {canSeeDebtWidgets && (
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader>
+            <CardTitle className="text-white flex items-center gap-2">
+              <Wallet className="h-5 w-5 text-amber-400" />
+              Receivables Overview
+            </CardTitle>
+            <p className="text-slate-400 text-sm">
+              Outstanding customer balances and collection status.
+            </p>
+          </CardHeader>
+          <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+              <p className="text-xs text-slate-400">Outstanding Debt</p>
+              <p className="mt-1 text-xl font-bold text-amber-300">
+                GHS {money(stats.outstandingDebt)}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+              <p className="text-xs text-slate-400">Customers Owing</p>
+              <p className="mt-1 text-xl font-bold text-white">
+                {stats.customersOwing}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+              <p className="text-xs text-slate-400">Cash Collected Today</p>
+              <p className="mt-1 text-xl font-bold text-emerald-300">
+                GHS {money(stats.cashCollectedToday)}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+              <p className="text-xs text-slate-400">Credit Sold Today</p>
+              <p className="mt-1 text-xl font-bold text-orange-300">
+                GHS {money(stats.creditSoldToday)}
+              </p>
+            </div>
+
+            <div className="md:col-span-2 xl:col-span-4 flex flex-wrap gap-2 pt-1">
+              <Button onClick={() => navigate("/customer-payments")}>
+                Open Customer Payments
+              </Button>
+              {canSeeDailySales && (
+                <Button
+                  variant="outline"
+                  onClick={() => navigate("/reports/daily-sales")}
+                >
+                  Open Daily Sales Report
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {isAdmin && !activeBranchId && (
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader>
@@ -495,7 +681,7 @@ export default function Dashboard() {
           <CardContent className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-400">
-                Products / Low stock / Pending receipts / Attendance (today)
+                Products / Low stock / Pending receipts / Attendance / Debt
               </p>
               <Button
                 variant="secondary"
@@ -509,9 +695,7 @@ export default function Dashboard() {
             {breakdownLoading ? (
               <p className="text-slate-400 text-sm">Loading breakdown…</p>
             ) : branchBreakdown.length === 0 ? (
-              <p className="text-slate-400 text-sm">
-                No breakdown data yet.
-              </p>
+              <p className="text-slate-400 text-sm">No breakdown data yet.</p>
             ) : (
               <div className="space-y-2">
                 {branchBreakdown.map((r) => (
@@ -524,7 +708,7 @@ export default function Dashboard() {
                       <p className="text-xs text-slate-400">{r.branchId}</p>
                     </div>
 
-                    <div className="mt-2 grid gap-2 sm:grid-cols-4">
+                    <div className="mt-2 grid gap-2 sm:grid-cols-6">
                       <div className="text-xs text-slate-300">
                         <span className="text-slate-500">Products:</span>{" "}
                         {r.totalProducts}
@@ -540,6 +724,14 @@ export default function Dashboard() {
                       <div className="text-xs text-slate-300">
                         <span className="text-slate-500">Attendance:</span>{" "}
                         {r.todayAttendance}
+                      </div>
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-500">Debt:</span> GHS{" "}
+                        {money(r.outstandingDebt)}
+                      </div>
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-500">Owing customers:</span>{" "}
+                        {r.customersOwing}
                       </div>
                     </div>
                   </div>
@@ -560,7 +752,6 @@ export default function Dashboard() {
           </CardHeader>
 
           <CardContent className="grid gap-4 sm:grid-cols-2">
-            {/* Cashier only */}
             {canSeeDailySales && (
               <Card
                 className="cursor-pointer bg-slate-900/60 border-slate-700 hover:bg-slate-800 transition"
@@ -576,7 +767,6 @@ export default function Dashboard() {
               </Card>
             )}
 
-            {/* Warehouse only */}
             {canSeeStockBalance && (
               <Card
                 className="cursor-pointer bg-slate-900/60 border-slate-700 hover:bg-slate-800 transition"
@@ -592,7 +782,6 @@ export default function Dashboard() {
               </Card>
             )}
 
-            {/* Admin only */}
             {canSeeStockApprovals && (
               <Card
                 className="cursor-pointer bg-slate-900/60 border-slate-700 hover:bg-slate-800 transition"
@@ -611,7 +800,6 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* ✅ ADMIN ONLY: Branch Management */}
       {isAdmin && (
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader>
@@ -622,7 +810,6 @@ export default function Dashboard() {
           </CardHeader>
 
           <CardContent className="space-y-5">
-            {/* Create Branch */}
             <div className="grid gap-3 sm:grid-cols-3 items-end">
               <div className="sm:col-span-2 space-y-2">
                 <Label className="text-slate-200">New Branch Name</Label>
@@ -642,7 +829,6 @@ export default function Dashboard() {
               </Button>
             </div>
 
-            {/* Branch List */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-white font-semibold">Your Branches</h3>

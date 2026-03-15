@@ -1808,8 +1808,8 @@ export default function POS() {
 
       // ✅ refresh top categories after a sale
       setCatSalesScanned(false);
-    } catch (error: any) {
-      if (!navigator.onLine && !processing) {
+        } catch (error: any) {
+      if (!navigator.onLine) {
         queueOfflineSale(payload);
         return;
       }
@@ -1818,7 +1818,6 @@ export default function POS() {
         queueOfflineSale(payload);
         return;
       }
-
       toast({
         title: "Confirm/Print issue",
         description: error?.message || "Could not complete printing",

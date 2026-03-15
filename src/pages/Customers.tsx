@@ -1,11 +1,11 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-    Dialog,
-    DialogContent,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -37,11 +37,15 @@ type CustomerSale = {
   total_amount: number;
   status: string;
   created_at: string;
+  is_returned?: boolean | null;
+  branch_id?: string | null;
 };
 
 type CustomerStats = {
   totalPurchases: number;
-  totalSpent: number;
+  grossPurchases: number;
+  totalReturns: number;
+  netPurchase: number;
   lastPurchaseAt: string | null;
 };
 
@@ -102,6 +106,33 @@ export default function Customers() {
     setOpen(true);
   };
 
+  const isValidSaleRow = (row: any) => {
+    if (!row) return false;
+    if (row?.is_returned) return false;
+
+    const status = String(row?.status || "").toLowerCase();
+    if (status === "cancelled" || status === "returned") return false;
+
+    if (currentBranchId && String(row?.branch_id || "") !== String(currentBranchId)) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const isApprovedReturnRow = (row: any) => {
+    if (!row) return false;
+
+    const status = String(row?.status || "").toLowerCase();
+    if (status !== "approved") return false;
+
+    if (currentBranchId && String(row?.branch_id || "") !== String(currentBranchId)) {
+      return false;
+    }
+
+    return true;
+  };
+
   const loadCustomers = async () => {
     if (!companyId) {
       setCustomers([]);
@@ -142,13 +173,32 @@ export default function Customers() {
     try {
       const customerIds = list.map((c) => c.id);
 
-      const { data, error } = await (supabase as any)
-        .from("sales")
-        .select("id,customer_id,total_amount,created_at")
-        .eq("company_id", companyId)
-        .in("customer_id", customerIds);
+      const [salesRes, returnsRes] = await Promise.all([
+        (supabase as any)
+          .from("sales")
+          .select("id,customer_id,total_amount,created_at,status,is_returned,branch_id")
+          .eq("company_id", companyId)
+          .in("customer_id", customerIds),
 
-      if (error) {
+        (supabase as any)
+          .from("returns")
+          .select(
+            `
+              id,
+              sale_id,
+              sale_item_id,
+              quantity,
+              status,
+              branch_id,
+              sale:sales ( id, customer_id ),
+              sale_item:sale_items ( id, unit_price )
+            `
+          )
+          .eq("company_id", companyId)
+          .eq("status", "approved"),
+      ]);
+
+      if (salesRes.error) {
         setCustomerStats({});
         setStatsLoading(false);
         return;
@@ -159,17 +209,21 @@ export default function Customers() {
       for (const c of list) {
         statsMap[c.id] = {
           totalPurchases: 0,
-          totalSpent: 0,
+          grossPurchases: 0,
+          totalReturns: 0,
+          netPurchase: 0,
           lastPurchaseAt: null,
         };
       }
 
-      for (const row of (data || []) as any[]) {
+      for (const row of (salesRes.data || []) as any[]) {
+        if (!isValidSaleRow(row)) continue;
+
         const customerId = String(row.customer_id || "");
         if (!customerId || !statsMap[customerId]) continue;
 
         statsMap[customerId].totalPurchases += 1;
-        statsMap[customerId].totalSpent += Number(row.total_amount || 0);
+        statsMap[customerId].grossPurchases += Number(row.total_amount || 0);
 
         const createdAt = String(row.created_at || "");
         if (
@@ -179,6 +233,26 @@ export default function Customers() {
         ) {
           statsMap[customerId].lastPurchaseAt = createdAt;
         }
+      }
+
+      if (!returnsRes.error) {
+        for (const row of (returnsRes.data || []) as any[]) {
+          if (!isApprovedReturnRow(row)) continue;
+
+          const customerId = String(row?.sale?.customer_id || "");
+          if (!customerId || !statsMap[customerId]) continue;
+
+          const qty = Number(row?.quantity || 0);
+          const unitPrice = Number(row?.sale_item?.unit_price || 0);
+          const returnAmount = qty * unitPrice;
+
+          statsMap[customerId].totalReturns += returnAmount;
+        }
+      }
+
+      for (const customerId of Object.keys(statsMap)) {
+        statsMap[customerId].netPurchase =
+          statsMap[customerId].grossPurchases - statsMap[customerId].totalReturns;
       }
 
       setCustomerStats(statsMap);
@@ -197,7 +271,9 @@ export default function Customers() {
 
     const { data, error } = await (supabase as any)
       .from("sales")
-      .select("id,receipt_number,customer_name,customer_phone,total_amount,status,created_at")
+      .select(
+        "id,receipt_number,customer_name,customer_phone,total_amount,status,created_at,is_returned,branch_id"
+      )
       .eq("company_id", companyId)
       .eq("customer_id", customer.id)
       .order("created_at", { ascending: false })
@@ -214,7 +290,9 @@ export default function Customers() {
       return;
     }
 
-    setHistorySales((data || []) as CustomerSale[]);
+    const cleanHistory = ((data || []) as CustomerSale[]).filter((row) => isValidSaleRow(row));
+
+    setHistorySales(cleanHistory);
     setHistoryLoading(false);
   };
 
@@ -226,7 +304,7 @@ export default function Customers() {
   useEffect(() => {
     void loadCustomerStats(customers);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customers, companyId]);
+  }, [customers, companyId, currentBranchId]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -352,9 +430,7 @@ export default function Customers() {
             />
           </div>
 
-          {loading && (
-            <p className="text-slate-400 text-center py-6">Loading customers...</p>
-          )}
+          {loading && <p className="text-slate-400 text-center py-6">Loading customers...</p>}
 
           {!loading && filtered.length === 0 && (
             <p className="text-slate-400 text-center py-6">No customers found</p>
@@ -364,15 +440,14 @@ export default function Customers() {
             {filtered.map((c) => {
               const stats = customerStats[c.id] || {
                 totalPurchases: 0,
-                totalSpent: 0,
+                grossPurchases: 0,
+                totalReturns: 0,
+                netPurchase: 0,
                 lastPurchaseAt: null,
               };
 
               return (
-                <div
-                  key={c.id}
-                  className="bg-slate-700/50 p-3 rounded-lg gap-3"
-                >
+                <div key={c.id} className="bg-slate-700/50 p-3 rounded-lg gap-3">
                   <div className="flex justify-between items-start gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -402,7 +477,7 @@ export default function Customers() {
                     </div>
                   </div>
 
-                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
                     <div className="rounded-md border border-slate-600 bg-slate-800/70 px-3 py-2">
                       <p className="text-[11px] text-slate-400">Total Purchases</p>
                       <p className="text-sm font-semibold text-white">
@@ -411,9 +486,23 @@ export default function Customers() {
                     </div>
 
                     <div className="rounded-md border border-slate-600 bg-slate-800/70 px-3 py-2">
-                      <p className="text-[11px] text-slate-400">Total Spent</p>
+                      <p className="text-[11px] text-slate-400">Gross Purchases</p>
                       <p className="text-sm font-semibold text-white">
-                        GHS {statsLoading ? "..." : money(stats.totalSpent)}
+                        GHS {statsLoading ? "..." : money(stats.grossPurchases)}
+                      </p>
+                    </div>
+
+                    <div className="rounded-md border border-slate-600 bg-slate-800/70 px-3 py-2">
+                      <p className="text-[11px] text-slate-400">Returns</p>
+                      <p className="text-sm font-semibold text-amber-300">
+                        GHS {statsLoading ? "..." : money(stats.totalReturns)}
+                      </p>
+                    </div>
+
+                    <div className="rounded-md border border-slate-600 bg-slate-800/70 px-3 py-2">
+                      <p className="text-[11px] text-slate-400">Net Purchase</p>
+                      <p className="text-sm font-semibold text-white">
+                        GHS {statsLoading ? "..." : money(stats.netPurchase)}
                       </p>
                     </div>
 
@@ -555,7 +644,9 @@ export default function Customers() {
             )}
 
             {!historyLoading && historySales.length === 0 && (
-              <p className="text-slate-400 text-center py-6">No purchases found for this customer</p>
+              <p className="text-slate-400 text-center py-6">
+                No valid purchases found for this customer
+              </p>
             )}
 
             {!historyLoading && historySales.length > 0 && (
