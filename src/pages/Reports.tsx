@@ -3,6 +3,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -13,7 +20,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { BarChart3, Package, TrendingUp, Wallet } from "lucide-react";
+import { Package, TrendingUp, Wallet } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 /** -----------------------------
@@ -21,15 +28,21 @@ import { useEffect, useMemo, useState } from "react";
  * ------------------------------*/
 interface SalesSummary {
   totalSales: number;
-  totalAmount: number; // gross sales value
-  totalPaidAmount: number; // actual money collected on those sales rows
-  outstandingDebt: number; // all open valid sales balances
-  totalCustomerDebt: number; // only customer-linked debt
+  totalAmount: number;
+  totalPaidAmount: number;
+  outstandingDebt: number;
+  totalCustomerDebt: number;
   avgSale: number;
 
   paidSalesCount: number;
   partialSalesCount: number;
   creditSalesCount: number;
+
+  cashCollectedAmount: number;
+  momoCollectedAmount: number;
+  cardCollectedAmount: number;
+  nonCashCollectedAmount: number;
+  creditSalesValue: number;
 
   returnsApprovedAmount: number;
   returnsApprovedCount: number;
@@ -37,10 +50,12 @@ interface SalesSummary {
 
   expensesApprovedAmount: number;
   expensesApprovedCount: number;
+  cashExpensesApprovedAmount: number;
 
-  totalDeductions: number; // returns + expenses
-  netAfterDeductions: number; // gross revenue - deductions
-  netCollectedAfterDeductions: number; // collected money - deductions
+  totalDeductions: number;
+  netAfterDeductions: number;
+  netCollectedAfterDeductions: number;
+  netCashPosition: number;
 }
 
 interface TopProduct {
@@ -82,13 +97,38 @@ type BranchCompareRow = {
   total_revenue: number;
   total_paid: number;
   outstanding_debt: number;
-
   approved_returns: number;
   approved_expenses: number;
-
   total_deductions: number;
   net_after_deductions: number;
   net_collected_after_deductions: number;
+};
+
+type CashReconciliationPreview = {
+  cashSalesReceived: number;
+  approvedCashReturns: number;
+  approvedCashExpenses: number;
+  expectedCash: number;
+};
+
+type CashReconciliationRow = {
+  id: string;
+  company_id: string;
+  branch_id: string;
+  reconciliation_date: string;
+  opening_float: number;
+  cash_sales_received: number;
+  cash_returns_paid: number;
+  cash_expenses_paid: number;
+  expected_cash: number;
+  actual_cash_counted: number;
+  difference_amount: number;
+  notes: string | null;
+  closed_by: string;
+  closed_at: string;
+  created_at: string;
+  updated_at: string;
+  is_locked: boolean;
 };
 
 /** -----------------------------
@@ -160,9 +200,10 @@ function isValidSale(row: any) {
 
 export default function Reports() {
   const { toast } = useToast();
-  const { activeBranchId, profile, companyName, companyLogoUrl } = useAuth() as any;
+  const { activeBranchId, profile, companyName, companyLogoUrl, user } = useAuth() as any;
 
   const companyId = (profile as any)?.company_id ?? null;
+  const userId = user?.id ?? (profile as any)?.user_id ?? null;
 
   const [startDate, setStartDate] = useState(isoDate(new Date()));
   const [endDate, setEndDate] = useState(isoDate(new Date()));
@@ -179,16 +220,24 @@ export default function Reports() {
     partialSalesCount: 0,
     creditSalesCount: 0,
 
+    cashCollectedAmount: 0,
+    momoCollectedAmount: 0,
+    cardCollectedAmount: 0,
+    nonCashCollectedAmount: 0,
+    creditSalesValue: 0,
+
     returnsApprovedAmount: 0,
     returnsApprovedCount: 0,
     returnsPendingCount: 0,
 
     expensesApprovedAmount: 0,
     expensesApprovedCount: 0,
+    cashExpensesApprovedAmount: 0,
 
     totalDeductions: 0,
     netAfterDeductions: 0,
     netCollectedAfterDeductions: 0,
+    netCashPosition: 0,
   });
 
   const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
@@ -207,19 +256,62 @@ export default function Reports() {
   const [branches, setBranches] = useState<BranchRow[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<BranchRow | null>(null);
 
+  const [selectedScopeBranchId, setSelectedScopeBranchId] = useState<string>("all");
+
   const [compareRows, setCompareRows] = useState<BranchCompareRow[]>([]);
   const [compareLoading, setCompareLoading] = useState(false);
 
+  // reconciliation
+  const [reconciliationDate, setReconciliationDate] = useState(isoDate(new Date()));
+  const [openingFloat, setOpeningFloat] = useState<string>("0");
+  const [actualCashCounted, setActualCashCounted] = useState<string>("0");
+  const [reconciliationNotes, setReconciliationNotes] = useState("");
+  const [reconLoading, setReconLoading] = useState(false);
+  const [reconSaving, setReconSaving] = useState(false);
+  const [existingReconciliationId, setExistingReconciliationId] = useState<string | null>(null);
+  const [isReconLocked, setIsReconLocked] = useState(false);
+
+  const [reconPreview, setReconPreview] = useState<CashReconciliationPreview>({
+    cashSalesReceived: 0,
+    approvedCashReturns: 0,
+    approvedCashExpenses: 0,
+    expectedCash: 0,
+  });
+
+  const scopedBranchId = selectedScopeBranchId === "all" ? null : selectedScopeBranchId;
+
   const scopeLabel = useMemo(() => {
-    if (activeBranchId) return selectedBranch?.name || "Selected branch";
+    if (scopedBranchId) return selectedBranch?.name || "Selected branch";
     return "All branches";
-  }, [activeBranchId, selectedBranch?.name]);
+  }, [scopedBranchId, selectedBranch?.name]);
+
+  const openingFloatNum = Number(openingFloat || 0);
+  const actualCashCountedNum = Number(actualCashCounted || 0);
+  const reconciliationDifference = actualCashCountedNum - reconPreview.expectedCash;
+
+  const reconciliationStatus = useMemo(() => {
+    const diff = reconciliationDifference;
+    if (Math.abs(diff) < 0.005) return "Balanced";
+    if (diff < 0) return "Short";
+    return "Excess";
+  }, [reconciliationDifference]);
+
+  const reconciliationStatusClasses = useMemo(() => {
+    if (reconciliationStatus === "Balanced") {
+      return "text-emerald-300 border-emerald-500/30 bg-emerald-500/10";
+    }
+    if (reconciliationStatus === "Short") {
+      return "text-red-300 border-red-500/30 bg-red-500/10";
+    }
+    return "text-amber-300 border-amber-500/30 bg-amber-500/10";
+  }, [reconciliationStatus]);
 
   const fetchOrgInfo = async () => {
     if (!companyId) {
       setCompany(null);
       setBranches([]);
       setSelectedBranch(null);
+      setSelectedScopeBranchId("all");
       return;
     }
 
@@ -246,22 +338,112 @@ export default function Reports() {
       if (activeBranchId) {
         const b = list.find((x) => x.id === activeBranchId) || null;
         setSelectedBranch(b);
+        setSelectedScopeBranchId(activeBranchId);
       } else {
         setSelectedBranch(null);
+        setSelectedScopeBranchId("all");
       }
     } catch (e: any) {
       console.error(e);
       setCompany(null);
       setBranches([]);
       setSelectedBranch(null);
+      setSelectedScopeBranchId("all");
     }
   };
 
   useEffect(() => {
     void fetchOrgInfo();
-    void fetchReports();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeBranchId, companyId]);
+
+  useEffect(() => {
+    if (!scopedBranchId) {
+      setSelectedBranch(null);
+      return;
+    }
+    const match = branches.find((b) => b.id === scopedBranchId) || null;
+    setSelectedBranch(match);
+  }, [branches, scopedBranchId]);
+
+  useEffect(() => {
+    void fetchReports();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, scopedBranchId]);
+
+  useEffect(() => {
+    const expected =
+      openingFloatNum +
+      reconPreview.cashSalesReceived -
+      reconPreview.approvedCashReturns -
+      reconPreview.approvedCashExpenses;
+
+    setReconPreview((prev) => ({
+      ...prev,
+      expectedCash: expected,
+    }));
+  }, [
+    openingFloatNum,
+    reconPreview.cashSalesReceived,
+    reconPreview.approvedCashReturns,
+    reconPreview.approvedCashExpenses,
+  ]);
+
+  const resetReconciliationForm = () => {
+    setOpeningFloat("0");
+    setActualCashCounted("0");
+    setReconciliationNotes("");
+    setExistingReconciliationId(null);
+    setIsReconLocked(false);
+  };
+
+  const loadExistingReconciliation = async () => {
+    if (!companyId || !scopedBranchId || !reconciliationDate) {
+      resetReconciliationForm();
+      return;
+    }
+
+    setReconLoading(true);
+
+    try {
+      const { data, error } = await (supabase as any)
+        .from("cash_reconciliations")
+        .select("*")
+        .eq("company_id", companyId)
+        .eq("branch_id", scopedBranchId)
+        .eq("reconciliation_date", reconciliationDate)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      const row = data as CashReconciliationRow | null;
+
+      if (!row) {
+        resetReconciliationForm();
+        return;
+      }
+
+      setExistingReconciliationId(row.id);
+      setOpeningFloat(String(Number(row.opening_float || 0)));
+      setActualCashCounted(String(Number(row.actual_cash_counted || 0)));
+      setReconciliationNotes(row.notes || "");
+      setIsReconLocked(Boolean(row.is_locked));
+    } catch (e: any) {
+      console.error(e);
+      resetReconciliationForm();
+    } finally {
+      setReconLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!scopedBranchId) {
+      resetReconciliationForm();
+      return;
+    }
+    void loadExistingReconciliation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedBranchId, reconciliationDate, companyId]);
 
   /** -----------------------------
    * Branch comparison (ALL branches only)
@@ -438,69 +620,49 @@ export default function Reports() {
         paidSalesCount: 0,
         partialSalesCount: 0,
         creditSalesCount: 0,
+        cashCollectedAmount: 0,
+        momoCollectedAmount: 0,
+        cardCollectedAmount: 0,
+        nonCashCollectedAmount: 0,
+        creditSalesValue: 0,
         returnsApprovedAmount: 0,
         returnsApprovedCount: 0,
         returnsPendingCount: 0,
         expensesApprovedAmount: 0,
         expensesApprovedCount: 0,
+        cashExpensesApprovedAmount: 0,
         totalDeductions: 0,
         netAfterDeductions: 0,
         netCollectedAfterDeductions: 0,
+        netCashPosition: 0,
       });
       setTopProducts([]);
       setAttendanceSummary({ total_staff: 0, present_today: 0 });
       setLowStockProducts([]);
       setCompareRows([]);
+      setReconPreview({
+        cashSalesReceived: 0,
+        approvedCashReturns: 0,
+        approvedCashExpenses: 0,
+        expectedCash: 0,
+      });
       return;
     }
 
     setLoading(true);
 
-    setSalesSummary({
-      totalSales: 0,
-      totalAmount: 0,
-      totalPaidAmount: 0,
-      outstandingDebt: 0,
-      totalCustomerDebt: 0,
-      avgSale: 0,
-
-      paidSalesCount: 0,
-      partialSalesCount: 0,
-      creditSalesCount: 0,
-
-      returnsApprovedAmount: 0,
-      returnsApprovedCount: 0,
-      returnsPendingCount: 0,
-
-      expensesApprovedAmount: 0,
-      expensesApprovedCount: 0,
-
-      totalDeductions: 0,
-      netAfterDeductions: 0,
-      netCollectedAfterDeductions: 0,
-    });
-
-    setTopProducts([]);
-    setAttendanceSummary({ total_staff: 0, present_today: 0 });
-    setLowStockProducts([]);
-
-    const today = isoDate(new Date());
-
     try {
-      /** =========================
-       * SALES summary (date range)
-       * ========================= */
       let salesQ = (supabase as any)
         .from("sales")
         .select(
-          "id,total_amount,amount_paid,balance_due,payment_status,branch_id,company_id,created_at,is_returned,customer_id,status"
+          "id,total_amount,amount_paid,balance_due,payment_status,payment_method,branch_id,company_id,created_at,is_returned,customer_id,status"
         )
         .eq("company_id", companyId)
         .gte("created_at", `${startDate}T00:00:00`)
         .lte("created_at", `${endDate}T23:59:59`);
 
-      if (activeBranchId) {
-        salesQ = salesQ.eq("branch_id", activeBranchId);
+      if (scopedBranchId) {
+        salesQ = salesQ.eq("branch_id", scopedBranchId);
       }
 
       const { data: sales, error: salesErr } = await salesQ;
@@ -522,16 +684,29 @@ export default function Reports() {
       let partialSalesCount = 0;
       let creditSalesCount = 0;
 
+      let cashCollectedAmount = 0;
+      let momoCollectedAmount = 0;
+      let cardCollectedAmount = 0;
+      let creditSalesValue = 0;
+
       safeSales.forEach((s: any) => {
         const ps = String(s?.payment_status || "").toLowerCase();
+        const pm = String(s?.payment_method || "").toLowerCase();
+        const paid = Number(s?.amount_paid || 0);
+        const total = Number(s?.total_amount || 0);
+
         if (ps === "paid") paidSalesCount += 1;
         else if (ps === "partial") partialSalesCount += 1;
         else if (ps === "credit") creditSalesCount += 1;
+
+        if (pm === "cash") cashCollectedAmount += paid;
+        else if (pm === "momo") momoCollectedAmount += paid;
+        else if (pm === "card") cardCollectedAmount += paid;
+        else if (pm === "credit") creditSalesValue += total;
       });
 
-      /** =========================
-       * RETURNS (approved/pending) in date range
-       * ========================= */
+      const nonCashCollectedAmount = momoCollectedAmount + cardCollectedAmount;
+
       let returnsBaseQ = (supabase as any)
         .from("returns")
         .select(
@@ -542,7 +717,7 @@ export default function Reports() {
           created_at,
           sale_item:sale_items(
             unit_price,
-            sale:sales!inner(branch_id,company_id)
+            sale:sales!inner(branch_id,company_id,payment_method)
           )
         `
         )
@@ -550,8 +725,8 @@ export default function Reports() {
         .lte("created_at", `${endDate}T23:59:59`)
         .eq("sale_item.sale.company_id", companyId);
 
-      if (activeBranchId) {
-        returnsBaseQ = returnsBaseQ.eq("sale_item.sale.branch_id", activeBranchId);
+      if (scopedBranchId) {
+        returnsBaseQ = returnsBaseQ.eq("sale_item.sale.branch_id", scopedBranchId);
       }
 
       const { data: returnsRows, error: retErr } = await returnsBaseQ;
@@ -560,32 +735,35 @@ export default function Reports() {
       let returnsApprovedAmount = 0;
       let returnsApprovedCount = 0;
       let returnsPendingCount = 0;
+      let approvedCashReturnsAmount = 0;
 
       (returnsRows ?? []).forEach((r: any) => {
         const status = String(r?.status || "").toLowerCase();
         const qty = Number(r?.quantity || 0);
         const unitPrice = Number(r?.sale_item?.unit_price || 0);
+        const amount = qty * unitPrice;
+        const salePaymentMethod = String(r?.sale_item?.sale?.payment_method || "").toLowerCase();
 
         if (status === "approved") {
           returnsApprovedCount += 1;
-          returnsApprovedAmount += qty * unitPrice;
+          returnsApprovedAmount += amount;
+          if (salePaymentMethod === "cash") {
+            approvedCashReturnsAmount += amount;
+          }
         } else if (status === "pending") {
           returnsPendingCount += 1;
         }
       });
 
-      /** =========================
-       * EXPENSES (approved only) in date range
-       * ========================= */
       let expQ = (supabase as any)
         .from("expenses")
-        .select("id,amount,branch_id,status,expense_date,company_id")
+        .select("id,amount,branch_id,status,expense_date,company_id,payment_method")
         .eq("status", "approved")
         .eq("company_id", companyId)
         .gte("expense_date", startDate)
         .lte("expense_date", endDate);
 
-      if (activeBranchId) expQ = expQ.eq("branch_id", activeBranchId);
+      if (scopedBranchId) expQ = expQ.eq("branch_id", scopedBranchId);
 
       const { data: expRows, error: expErr } = await expQ;
       if (expErr) throw expErr;
@@ -595,6 +773,11 @@ export default function Reports() {
         0
       );
       const expensesApprovedCount = (expRows ?? []).length;
+      const cashExpensesApprovedAmount = (expRows ?? []).reduce((sum: number, e: any) => {
+        const pm = String(e?.payment_method || "").toLowerCase();
+        if (pm !== "cash") return sum;
+        return sum + Number(e?.amount || 0);
+      }, 0);
 
       const totalSales = safeSales.length;
       const avgSale = totalSales > 0 ? totalAmount / totalSales : 0;
@@ -614,6 +797,8 @@ export default function Reports() {
       const totalDeductions = returnsApprovedAmount + expensesApprovedAmount;
       const netAfterDeductions = totalAmount - totalDeductions;
       const netCollectedAfterDeductions = totalPaidAmount - totalDeductions;
+      const netCashPosition =
+        cashCollectedAmount - approvedCashReturnsAmount - cashExpensesApprovedAmount;
 
       setSalesSummary({
         totalSales,
@@ -627,21 +812,37 @@ export default function Reports() {
         partialSalesCount,
         creditSalesCount,
 
+        cashCollectedAmount,
+        momoCollectedAmount,
+        cardCollectedAmount,
+        nonCashCollectedAmount,
+        creditSalesValue,
+
         returnsApprovedAmount,
         returnsApprovedCount,
         returnsPendingCount,
 
         expensesApprovedAmount,
         expensesApprovedCount,
+        cashExpensesApprovedAmount,
 
         totalDeductions,
         netAfterDeductions,
         netCollectedAfterDeductions,
+        netCashPosition,
       });
 
-      /** =========================
-       * Top products (last 30 days)
-       * ========================= */
+      setReconPreview({
+        cashSalesReceived: cashCollectedAmount,
+        approvedCashReturns: approvedCashReturnsAmount,
+        approvedCashExpenses: cashExpensesApprovedAmount,
+        expectedCash:
+          openingFloatNum +
+          cashCollectedAmount -
+          approvedCashReturnsAmount -
+          cashExpensesApprovedAmount,
+      });
+
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
       let saleItemsQ = (supabase as any)
@@ -657,8 +858,8 @@ export default function Reports() {
         .gte("created_at", thirtyDaysAgo)
         .eq("sale.company_id", companyId);
 
-      if (activeBranchId) {
-        saleItemsQ = saleItemsQ.eq("sale.branch_id", activeBranchId);
+      if (scopedBranchId) {
+        saleItemsQ = saleItemsQ.eq("sale.branch_id", scopedBranchId);
       }
 
       const { data: saleItems, error: itemsErr } = await saleItemsQ;
@@ -689,16 +890,15 @@ export default function Reports() {
         setTopProducts(sorted);
       }
 
-      /** =========================
-       * Attendance today
-       * ========================= */
+      const today = isoDate(new Date());
+
       let staffQ = (supabase as any)
         .from("profiles")
         .select("*", { count: "exact", head: true })
         .eq("company_id", companyId)
         .filter("deleted_at", "is", null);
 
-      if (activeBranchId) staffQ = staffQ.eq("branch_id", activeBranchId);
+      if (scopedBranchId) staffQ = staffQ.eq("branch_id", scopedBranchId);
 
       const { count: totalStaff, error: staffErr } = await staffQ;
       if (staffErr) throw staffErr;
@@ -708,7 +908,7 @@ export default function Reports() {
         .select("*", { count: "exact", head: true })
         .eq("date", today);
 
-      if (activeBranchId) presentQ = presentQ.eq("branch_id", activeBranchId);
+      if (scopedBranchId) presentQ = presentQ.eq("branch_id", scopedBranchId);
 
       const { count: presentToday, error: presentErr } = await presentQ;
       if (presentErr) throw presentErr;
@@ -718,9 +918,6 @@ export default function Reports() {
         present_today: presentToday || 0,
       });
 
-      /** =========================
-       * Low stock
-       * ========================= */
       let lowStockQ = (supabase as any)
         .from("products")
         .select("name, quantity_in_stock, reorder_level")
@@ -729,14 +926,14 @@ export default function Reports() {
         .order("quantity_in_stock", { ascending: true })
         .limit(10);
 
-      if (activeBranchId) lowStockQ = lowStockQ.eq("branch_id", activeBranchId);
+      if (scopedBranchId) lowStockQ = lowStockQ.eq("branch_id", scopedBranchId);
 
       const { data: lowStock, error: lowErr } = await lowStockQ;
       if (lowErr) throw lowErr;
 
       setLowStockProducts(lowStock || []);
 
-      if (!activeBranchId) {
+      if (!scopedBranchId) {
         await fetchBranchComparison();
       } else {
         setCompareRows([]);
@@ -753,8 +950,103 @@ export default function Reports() {
     }
   };
 
+  const handleSaveReconciliation = async () => {
+    if (!companyId || !scopedBranchId || !userId) {
+      toast({
+        title: "Missing details",
+        description: "Company, branch, or user is missing.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (isReconLocked) {
+      toast({
+        title: "Locked record",
+        description: "This closing record is locked and cannot be edited.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setReconSaving(true);
+
+    const nowIso = new Date().toISOString();
+
+    const payload = {
+      company_id: companyId,
+      branch_id: scopedBranchId,
+      reconciliation_date: reconciliationDate,
+      opening_float: openingFloatNum,
+      cash_sales_received: reconPreview.cashSalesReceived,
+      cash_returns_paid: reconPreview.approvedCashReturns,
+      cash_expenses_paid: reconPreview.approvedCashExpenses,
+      expected_cash: reconPreview.expectedCash,
+      actual_cash_counted: actualCashCountedNum,
+      difference_amount: reconciliationDifference,
+      notes: reconciliationNotes.trim() || null,
+      closed_by: userId,
+      closed_at: nowIso,
+      is_locked: true,
+    };
+
+    try {
+      if (existingReconciliationId) {
+        const { error } = await (supabase as any)
+          .from("cash_reconciliations")
+          .update({
+            opening_float: payload.opening_float,
+            cash_sales_received: payload.cash_sales_received,
+            cash_returns_paid: payload.cash_returns_paid,
+            cash_expenses_paid: payload.cash_expenses_paid,
+            expected_cash: payload.expected_cash,
+            actual_cash_counted: payload.actual_cash_counted,
+            difference_amount: payload.difference_amount,
+            notes: payload.notes,
+            closed_by: payload.closed_by,
+            closed_at: payload.closed_at,
+            is_locked: payload.is_locked,
+          })
+          .eq("id", existingReconciliationId);
+
+        if (error) throw error;
+
+        setIsReconLocked(true);
+
+        toast({
+          title: "Reconciliation updated",
+          description: "Closing record updated and locked successfully.",
+        });
+      } else {
+        const { data, error } = await (supabase as any)
+          .from("cash_reconciliations")
+          .insert(payload)
+          .select("id,is_locked")
+          .single();
+
+        if (error) throw error;
+
+        setExistingReconciliationId(String(data?.id || ""));
+        setIsReconLocked(Boolean(data?.is_locked ?? true));
+
+        toast({
+          title: "Reconciliation saved",
+          description: "Closing record saved and locked successfully.",
+        });
+      }
+    } catch (e: any) {
+      toast({
+        title: "Save failed",
+        description: e?.message || "Could not save reconciliation.",
+        variant: "destructive",
+      });
+    } finally {
+      setReconSaving(false);
+    }
+  };
+
   /** -----------------------------
-   * PDF Export
+   * PDF / Print
    * ------------------------------*/
   const openPdfWindow = (html: string) => {
     const win = window.open("", "_blank");
@@ -777,7 +1069,6 @@ export default function Reports() {
       body { font-family: Arial, sans-serif; padding: 18px; color: var(--text); }
       .paper { max-width: 1100px; margin: 0 auto; }
       .printBtn { margin-bottom: 12px; }
-
       .header {
         display:flex; justify-content:space-between; align-items:flex-start; gap:14px;
         border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;
@@ -795,19 +1086,6 @@ export default function Reports() {
       .sub { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
       .meta { text-align:right; font-size: 12px; color: var(--muted); }
       .meta b { color: var(--text); }
-
-      .cards { display:flex; gap:10px; flex-wrap:wrap; margin: 12px 0 10px; }
-      .kpi {
-        flex: 1 1 200px;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 10px 12px;
-        background: white;
-      }
-      .kpi .label { font-size: 11px; color: var(--muted); }
-      .kpi .value { font-size: 20px; font-weight: 900; margin-top: 4px; }
-      .kpi .small { font-size: 11px; color: var(--muted); margin-top: 4px; line-height:1.35; }
-
       .box {
         margin: 10px 0 14px;
         padding: 12px;
@@ -817,20 +1095,15 @@ export default function Reports() {
       }
       .boxTitle { font-weight: 800; margin-bottom: 8px; }
       .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
-
       table { width: 100%; border-collapse: collapse; font-size: 12px; background:white; }
       th, td { border: 1px solid var(--border); padding: 8px; vertical-align: top; }
       th { background: #f3f4f6; text-align: left; }
       .muted { color: var(--muted); }
       .right { text-align:right; }
-      .nowrap { white-space: nowrap; }
-
-      .sigRow { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 18px; }
+      .sigRow { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 24px; }
       .sigBox { font-size: 12px; }
-      .sigLine { border-bottom: 1px solid #9ca3af; height: 18px; margin-top: 18px; }
+      .sigLine { border-bottom: 1px solid #9ca3af; height: 22px; margin-top: 24px; }
       .sigLabel { color: var(--muted); margin-top: 6px; }
-
       @media print {
         .printBtn { display:none; }
         body { padding:0; }
@@ -843,9 +1116,7 @@ export default function Reports() {
     const co = (company?.name || companyName || "Company") as string;
     const initials = companyInitials(co);
 
-    const scopeLine = activeBranchId
-      ? selectedBranch?.name || "Selected Branch"
-      : "All Branches";
+    const scopeLine = scopedBranchId ? selectedBranch?.name || "Selected Branch" : "All Branches";
 
     const logoHtml = logoDataUrl
       ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
@@ -875,7 +1146,7 @@ export default function Reports() {
   const buildPdfContactsHtml = () => {
     const coName = (company?.name || companyName || "Company") as string;
 
-    if (activeBranchId && selectedBranch) {
+    if (scopedBranchId && selectedBranch) {
       return `
         <div class="box">
           <div class="boxTitle">Branch Contacts</div>
@@ -906,80 +1177,8 @@ export default function Reports() {
     try {
       const logoDataUrl = await urlToDataUrl(companyLogoUrl || company?.logo_url || null);
 
-      const title = "Reports & Analytics";
+      const title = "Financial Report";
       const subtitle = `${startDate} to ${endDate}`;
-
-      const topProductsRows = topProducts
-        .map(
-          (p, i) => `
-            <tr>
-              <td class="nowrap">${i + 1}</td>
-              <td>${escapeHtml(p.name)}</td>
-              <td class="right">${escapeHtml(p.total_qty)}</td>
-              <td class="right">GHC ${escapeHtml(money(p.total_revenue))}</td>
-            </tr>
-          `
-        )
-        .join("");
-
-      const lowStockRows = lowStockProducts
-        .map(
-          (p, i) => `
-            <tr>
-              <td class="nowrap">${i + 1}</td>
-              <td>${escapeHtml(p.name)}</td>
-              <td class="right">${escapeHtml(p.quantity_in_stock)}</td>
-              <td class="right">${escapeHtml(p.reorder_level || 10)}</td>
-            </tr>
-          `
-        )
-        .join("");
-
-      const compareHtml =
-        !activeBranchId && compareRows.length
-          ? `
-            <div class="box">
-              <div class="boxTitle">Branch Comparison (Selected period)</div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Branch</th>
-                    <th class="right">Sales</th>
-                    <th class="right">Revenue</th>
-                    <th class="right">Paid</th>
-                    <th class="right">Debt</th>
-                    <th class="right">Deductions</th>
-                    <th class="right">Net Collected</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${compareRows
-                    .map(
-                      (r) => `
-                        <tr>
-                          <td>
-                            ${escapeHtml(r.branch_name)}
-                            <div class="muted" style="font-size:11px; margin-top:3px;">
-                              Returns: GHC ${escapeHtml(money(r.approved_returns))} • Expenses: GHC ${escapeHtml(
-                        money(r.approved_expenses)
-                      )}
-                            </div>
-                          </td>
-                          <td class="right">${escapeHtml(r.total_sales)}</td>
-                          <td class="right">GHC ${escapeHtml(money(r.total_revenue))}</td>
-                          <td class="right">GHC ${escapeHtml(money(r.total_paid))}</td>
-                          <td class="right">GHC ${escapeHtml(money(r.outstanding_debt))}</td>
-                          <td class="right">GHC ${escapeHtml(money(r.total_deductions))}</td>
-                          <td class="right">GHC ${escapeHtml(money(r.net_collected_after_deductions))}</td>
-                        </tr>
-                      `
-                    )
-                    .join("")}
-                </tbody>
-              </table>
-            </div>
-          `
-          : ``;
 
       const html = `
         <html>
@@ -990,142 +1189,17 @@ export default function Reports() {
           <body>
             <div class="paper">
               <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
-
               ${buildPdfHeader(title, subtitle, logoDataUrl)}
-
               <div class="grid2">
                 ${buildPdfContactsHtml()}
                 <div class="box">
-                  <div class="boxTitle">Notes</div>
+                  <div class="boxTitle">Summary</div>
                   <div class="muted" style="font-size:12px; line-height:1.5;">
-                    <div>• Gross revenue = full value of valid sales</div>
-                    <div>• Collected = amount actually paid by customers</div>
-                    <div>• Outstanding debt = unpaid balances still owed</div>
-                    <div>• Customer debt = balances linked to customers only</div>
-                    <div>• Total deductions = Approved returns + Approved expenses</div>
-                    <div>• Net collected after deductions = collected money − deductions</div>
-                    <div style="margin-top:6px;">
-                      Returns: GHC ${escapeHtml(money(salesSummary.returnsApprovedAmount))} •
-                      Expenses: GHC ${escapeHtml(money(salesSummary.expensesApprovedAmount))}
-                    </div>
+                    <div>Gross Revenue: GHC ${escapeHtml(money(salesSummary.totalAmount))}</div>
+                    <div>Total Paid: GHC ${escapeHtml(money(salesSummary.totalPaidAmount))}</div>
+                    <div>Net Cash Position: GHC ${escapeHtml(money(salesSummary.netCashPosition))}</div>
                   </div>
                 </div>
-              </div>
-
-              <div class="cards">
-                <div class="kpi">
-                  <div class="label">Total Sales</div>
-                  <div class="value">${escapeHtml(salesSummary.totalSales)}</div>
-                  <div class="small">transactions</div>
-                </div>
-                <div class="kpi">
-                  <div class="label">Gross Revenue</div>
-                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalAmount))}</div>
-                  <div class="small">full value of valid sales</div>
-                </div>
-                <div class="kpi">
-                  <div class="label">Collected</div>
-                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalPaidAmount))}</div>
-                  <div class="small">
-                    Paid: ${escapeHtml(salesSummary.paidSalesCount)} • Partial: ${escapeHtml(
-        salesSummary.partialSalesCount
-      )} • Credit: ${escapeHtml(salesSummary.creditSalesCount)}
-                  </div>
-                </div>
-                <div class="kpi">
-                  <div class="label">Outstanding Debt</div>
-                  <div class="value">GHC ${escapeHtml(money(salesSummary.outstandingDebt))}</div>
-                  <div class="small">all valid unpaid balances</div>
-                </div>
-                <div class="kpi">
-                  <div class="label">Customer Debt</div>
-                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalCustomerDebt))}</div>
-                  <div class="small">customer balances only</div>
-                </div>
-                <div class="kpi">
-                  <div class="label">Total Deductions</div>
-                  <div class="value">GHC ${escapeHtml(money(salesSummary.totalDeductions))}</div>
-                  <div class="small">returns + expenses</div>
-                </div>
-                <div class="kpi">
-                  <div class="label">Net Collected After Deductions</div>
-                  <div class="value">GHC ${escapeHtml(
-                    money(salesSummary.netCollectedAfterDeductions)
-                  )}</div>
-                  <div class="small">actual collected cash − deductions</div>
-                </div>
-              </div>
-
-              ${compareHtml}
-
-              <div class="box">
-                <div class="boxTitle">Top Selling Products (Last 30 Days)</div>
-                <table>
-                  <thead>
-                    <tr>
-                      <th style="width:42px;">#</th>
-                      <th>Product</th>
-                      <th class="right" style="width:120px;">Qty</th>
-                      <th class="right" style="width:170px;">Revenue</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${
-                      topProducts.length
-                        ? topProductsRows
-                        : `<tr><td colspan="4" class="muted">No sales data available.</td></tr>`
-                    }
-                  </tbody>
-                </table>
-              </div>
-
-              <div class="box">
-                <div class="boxTitle">Low Stock Alert</div>
-                <table>
-                  <thead>
-                    <tr>
-                      <th style="width:42px;">#</th>
-                      <th>Product</th>
-                      <th class="right" style="width:120px;">In Stock</th>
-                      <th class="right" style="width:140px;">Reorder At</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${
-                      lowStockProducts.length
-                        ? lowStockRows
-                        : `<tr><td colspan="4" class="muted">All products are well stocked.</td></tr>`
-                    }
-                  </tbody>
-                </table>
-
-                <div class="muted" style="margin-top:10px; font-size:12px;">
-                  Attendance today: ${escapeHtml(
-                    `${attendanceSummary.present_today}/${attendanceSummary.total_staff}`
-                  )} staff present.
-                </div>
-
-                <div class="sigRow">
-                  <div class="sigBox">
-                    <b>Prepared by:</b>
-                    <div class="sigLine"></div>
-                    <div class="sigLabel">Signature</div>
-                  </div>
-                  <div class="sigBox">
-                    <b>Checked by:</b>
-                    <div class="sigLine"></div>
-                    <div class="sigLabel">Signature</div>
-                  </div>
-                  <div class="sigBox">
-                    <b>Approved by:</b>
-                    <div class="sigLine"></div>
-                    <div class="sigLabel">Signature</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="muted" style="margin-top:12px; font-size:11px;">
-                ${escapeHtml(company?.receipt_footer || "Powered by Philuz Appz")}
               </div>
             </div>
           </body>
@@ -1142,13 +1216,163 @@ export default function Reports() {
     }
   };
 
+  const printClosingSlip = async () => {
+    if (!scopedBranchId) {
+      toast({
+        title: "Branch required",
+        description: "Please select a branch before printing a closing slip.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const branchLabel = selectedBranch?.name || "Selected Branch";
+    const logoDataUrl = await urlToDataUrl(companyLogoUrl || company?.logo_url || null);
+    const title = "Daily Cash Closing Slip";
+    const subtitle = `Closing Date: ${reconciliationDate}`;
+
+    const companyDisplay = company?.name || companyName || "Company";
+    const initials = companyInitials(companyDisplay);
+    const logoHtml = logoDataUrl
+      ? `<img class="logoImg" src="${logoDataUrl}" alt="Logo" />`
+      : escapeHtml(initials);
+
+    const diffText =
+      reconciliationStatus === "Balanced"
+        ? "Balanced"
+        : reconciliationStatus === "Short"
+        ? "Shortage"
+        : "Excess";
+
+    const html = `
+      <html>
+        <head>
+          <title>${escapeHtml(title)} - ${escapeHtml(branchLabel)} - ${escapeHtml(
+      reconciliationDate
+    )}</title>
+          ${basePdfCss}
+        </head>
+        <body>
+          <div class="paper">
+            <button class="printBtn" onclick="window.print()">Print / Save as PDF</button>
+
+            <div class="header">
+              <div class="brandRow">
+                <div class="logoBadge">${logoHtml}</div>
+                <div>
+                  <div class="brand">${escapeHtml(companyDisplay)}</div>
+                  <div style="font-weight:800; margin-top:2px;">${escapeHtml(title)}</div>
+                  <div class="sub">
+                    ${escapeHtml(subtitle)}<br/>
+                    ${escapeHtml(branchLabel)}
+                  </div>
+                </div>
+              </div>
+              <div class="meta">
+                <div><b>Generated:</b> ${escapeHtml(new Date().toLocaleString())}</div>
+                <div><b>Status:</b> ${escapeHtml(diffText)}</div>
+              </div>
+            </div>
+
+            <div class="grid2">
+              <div class="box">
+                <div class="boxTitle">Branch Details</div>
+                <div class="muted" style="font-size:12px; line-height:1.6;">
+                  <div><b>Branch:</b> ${escapeHtml(branchLabel)}</div>
+                  <div><b>Address:</b> ${escapeHtml(selectedBranch?.address || "-")}</div>
+                  <div><b>Phone:</b> ${escapeHtml(selectedBranch?.phone || "-")}</div>
+                  <div><b>Email:</b> ${escapeHtml(selectedBranch?.email || "-")}</div>
+                </div>
+              </div>
+
+              <div class="box">
+                <div class="boxTitle">Closing Notes</div>
+                <div class="muted" style="font-size:12px; line-height:1.6;">
+                  ${escapeHtml(reconciliationNotes || "No notes added.")}
+                </div>
+              </div>
+            </div>
+
+            <div class="box">
+              <div class="boxTitle">Cash Breakdown</div>
+              <table>
+                <tbody>
+                  <tr>
+                    <th>Opening Float</th>
+                    <td class="right">GHS ${escapeHtml(money(openingFloatNum))}</td>
+                  </tr>
+                  <tr>
+                    <th>Cash Sales Received</th>
+                    <td class="right">GHS ${escapeHtml(money(reconPreview.cashSalesReceived))}</td>
+                  </tr>
+                  <tr>
+                    <th>Approved Cash Returns</th>
+                    <td class="right">GHS ${escapeHtml(money(reconPreview.approvedCashReturns))}</td>
+                  </tr>
+                  <tr>
+                    <th>Approved Cash Expenses</th>
+                    <td class="right">GHS ${escapeHtml(money(reconPreview.approvedCashExpenses))}</td>
+                  </tr>
+                  <tr>
+                    <th>Expected Cash</th>
+                    <td class="right">GHS ${escapeHtml(money(reconPreview.expectedCash))}</td>
+                  </tr>
+                  <tr>
+                    <th>Actual Cash Counted</th>
+                    <td class="right">GHS ${escapeHtml(money(actualCashCountedNum))}</td>
+                  </tr>
+                  <tr>
+                    <th>${escapeHtml(diffText)}</th>
+                    <td class="right">GHS ${escapeHtml(money(reconciliationDifference))}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="box">
+              <div class="boxTitle">Formula</div>
+              <div class="muted" style="font-size:12px; line-height:1.6;">
+                Expected Cash = Opening Float + Cash Sales Received − Approved Cash Returns − Approved Cash Expenses
+              </div>
+            </div>
+
+            <div class="sigRow">
+              <div class="sigBox">
+                <b>Prepared by</b>
+                <div class="sigLine"></div>
+                <div class="sigLabel">Cashier / Officer</div>
+              </div>
+              <div class="sigBox">
+                <b>Checked by</b>
+                <div class="sigLine"></div>
+                <div class="sigLabel">Supervisor</div>
+              </div>
+              <div class="sigBox">
+                <b>Approved by</b>
+                <div class="sigLine"></div>
+                <div class="sigLabel">Manager / Admin</div>
+              </div>
+            </div>
+
+            <div class="muted" style="margin-top:18px; font-size:11px;">
+              ${escapeHtml(company?.receipt_footer || "Powered by Philuz Appz")}
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    openPdfWindow(html);
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white">Reports & Analytics</h1>
+          <h1 className="text-2xl font-bold text-white">Financial Report</h1>
           <p className="text-slate-400">
-            Business insights and summaries <span className="text-slate-500">• {scopeLabel}</span>
+            Company financial insights and branch summaries{" "}
+            <span className="text-slate-500">• {scopeLabel}</span>
           </p>
         </div>
 
@@ -1161,8 +1385,8 @@ export default function Reports() {
 
       <Card className="bg-slate-800/50 border-slate-700">
         <CardContent className="pt-6">
-          <div className="flex flex-col sm:flex-row gap-4 items-end">
-            <div className="flex-1">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 items-end">
+            <div>
               <Label className="text-slate-200">Start Date</Label>
               <Input
                 type="date"
@@ -1171,7 +1395,8 @@ export default function Reports() {
                 className="bg-slate-700 border-slate-600 text-white"
               />
             </div>
-            <div className="flex-1">
+
+            <div>
               <Label className="text-slate-200">End Date</Label>
               <Input
                 type="date"
@@ -1180,174 +1405,276 @@ export default function Reports() {
                 className="bg-slate-700 border-slate-600 text-white"
               />
             </div>
-            <Button onClick={() => void fetchReports()} disabled={loading}>
-              {loading ? "Loading..." : "Generate Report"}
-            </Button>
+
+            <div>
+              <Label className="text-slate-200">Branch Scope</Label>
+              <Select
+                value={selectedScopeBranchId}
+                onValueChange={(v) => setSelectedScopeBranchId(v)}
+              >
+                <SelectTrigger className="bg-slate-700 border-slate-600 text-white">
+                  <SelectValue placeholder="Select branch scope" />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                  <SelectItem value="all">All Branches</SelectItem>
+                  {branches.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div>
+              <Button onClick={() => void fetchReports()} disabled={loading} className="w-full">
+                {loading ? "Loading..." : "Generate Report"}
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      <div className="bg-slate-800/20 border border-slate-700 rounded-xl p-3">
-        <div className="flex gap-4 overflow-x-auto pb-2 snap-x snap-mandatory lg:grid lg:grid-cols-4 2xl:grid-cols-9 lg:overflow-visible">
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Total Sales
-              </CardTitle>
-              <BarChart3 className="h-5 w-5 text-blue-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">{salesSummary.totalSales}</div>
-              <p className="text-xs text-slate-400">transactions</p>
-            </CardContent>
-          </Card>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-400">Gross Revenue</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-white">GHC {money(salesSummary.totalAmount)}</div>
+          </CardContent>
+        </Card>
 
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Gross Revenue
-              </CardTitle>
-              <TrendingUp className="h-5 w-5 text-green-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.totalAmount)}
-              </div>
-              <p className="text-xs text-slate-400">full value of valid sales</p>
-            </CardContent>
-          </Card>
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-400">Total Paid</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-white">
+              GHC {money(salesSummary.totalPaidAmount)}
+            </div>
+          </CardContent>
+        </Card>
 
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Total Paid
-              </CardTitle>
-              <Wallet className="h-5 w-5 text-emerald-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.totalPaidAmount)}
-              </div>
-              <p className="text-xs text-slate-400">
-                paid {salesSummary.paidSalesCount} • partial {salesSummary.partialSalesCount} •
-                credit {salesSummary.creditSalesCount}
-              </p>
-            </CardContent>
-          </Card>
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-400">Cash Collected</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-white">
+              GHC {money(salesSummary.cashCollectedAmount)}
+            </div>
+          </CardContent>
+        </Card>
 
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Outstanding Debt
-              </CardTitle>
-              <Wallet className="h-5 w-5 text-yellow-400" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-yellow-300">
-                GHC {money(salesSummary.outstandingDebt)}
-              </div>
-              <p className="text-xs text-slate-400">all valid unpaid balances</p>
-            </CardContent>
-          </Card>
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-400">Outstanding Debt</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-yellow-300">
+              GHC {money(salesSummary.outstandingDebt)}
+            </div>
+          </CardContent>
+        </Card>
 
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Customer Debt
-              </CardTitle>
-              <Wallet className="h-5 w-5 text-rose-400" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-rose-300">
-                GHC {money(salesSummary.totalCustomerDebt)}
-              </div>
-              <p className="text-xs text-slate-400">customer balances only</p>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Approved Returns
-              </CardTitle>
-              <TrendingUp className="h-5 w-5 text-orange-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.returnsApprovedAmount)}
-              </div>
-              <p className="text-xs text-slate-400">
-                {salesSummary.returnsApprovedCount} approved •{" "}
-                {salesSummary.returnsPendingCount} pending
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Approved Expenses
-              </CardTitle>
-              <TrendingUp className="h-5 w-5 text-amber-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.expensesApprovedAmount)}
-              </div>
-              <p className="text-xs text-slate-400">
-                {salesSummary.expensesApprovedCount} approved
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Total Deductions
-              </CardTitle>
-              <TrendingUp className="h-5 w-5 text-red-400" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.totalDeductions)}
-              </div>
-              <p className="text-xs text-slate-400">returns + expenses</p>
-              <p className="text-[11px] text-slate-500 mt-1">
-                Returns: GHC {money(salesSummary.returnsApprovedAmount)} • Expenses: GHC{" "}
-                {money(salesSummary.expensesApprovedAmount)}
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-slate-800/50 border-slate-700 min-w-[260px] snap-start lg:min-w-0">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-slate-400">
-                Net Collected After Deductions
-              </CardTitle>
-              <TrendingUp className="h-5 w-5 text-cyan-400" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-white">
-                GHC {money(salesSummary.netCollectedAfterDeductions)}
-              </div>
-              <p className="text-xs text-slate-400">actual collected cash − deductions</p>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="text-[11px] text-slate-500 mt-2 lg:hidden">
-          Swipe left/right to view more cards →
-        </div>
+        <Card className="bg-slate-800/50 border-slate-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-400">Net Cash Position</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-cyan-300">
+              GHC {money(salesSummary.netCashPosition)}
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
-      {!activeBranchId && (
+      <Card className="bg-slate-800/50 border-slate-700">
+        <CardHeader>
+          <CardTitle className="text-white flex items-center gap-2">
+            <Wallet className="h-5 w-5" />
+            Daily Cash Reconciliation
+          </CardTitle>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          {!scopedBranchId ? (
+            <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 text-slate-300">
+              Cash reconciliation is <span className="font-semibold text-white">branch-specific</span>.
+              Please select one branch above.
+            </div>
+          ) : (
+            <>
+              {existingReconciliationId && isReconLocked && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="inline-flex rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-sm font-medium text-amber-300">
+                      Locked Closing Record
+                    </span>
+                    <span className="text-sm text-slate-300">
+                      This reconciliation has already been closed and cannot be edited.
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <div>
+                  <Label className="text-slate-200">Reconciliation Date</Label>
+                  <Input
+                    type="date"
+                    value={reconciliationDate}
+                    onChange={(e) => setReconciliationDate(e.target.value)}
+                    className="bg-slate-700 border-slate-600 text-white"
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-slate-200">Opening Float</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={openingFloat}
+                    onChange={(e) => setOpeningFloat(e.target.value)}
+                    className="bg-slate-700 border-slate-600 text-white"
+                    disabled={isReconLocked}
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-slate-200">Actual Cash Counted</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={actualCashCounted}
+                    onChange={(e) => setActualCashCounted(e.target.value)}
+                    className="bg-slate-700 border-slate-600 text-white"
+                    disabled={isReconLocked}
+                  />
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                  <p className="text-[11px] text-slate-400">Status</p>
+                  <div
+                    className={`mt-2 inline-flex rounded-full border px-3 py-1 text-sm font-medium ${reconciliationStatusClasses}`}
+                  >
+                    {reconciliationStatus}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <Label className="text-slate-200">Notes</Label>
+                <Input
+                  value={reconciliationNotes}
+                  onChange={(e) => setReconciliationNotes(e.target.value)}
+                  className="bg-slate-700 border-slate-600 text-white"
+                  placeholder="Optional note about shortage, excess, or closing remarks"
+                  disabled={isReconLocked}
+                />
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                <div className="rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                  <p className="text-[11px] text-slate-400">Cash Sales Received</p>
+                  <p className="mt-2 text-2xl font-bold text-white">
+                    GHC {money(reconPreview.cashSalesReceived)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                  <p className="text-[11px] text-slate-400">Approved Cash Returns</p>
+                  <p className="mt-2 text-2xl font-bold text-white">
+                    GHC {money(reconPreview.approvedCashReturns)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                  <p className="text-[11px] text-slate-400">Approved Cash Expenses</p>
+                  <p className="mt-2 text-2xl font-bold text-white">
+                    GHC {money(reconPreview.approvedCashExpenses)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-3">
+                  <p className="text-[11px] text-cyan-200">Expected Cash</p>
+                  <p className="mt-2 text-2xl font-bold text-cyan-100">
+                    GHC {money(reconPreview.expectedCash)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                  <p className="text-[11px] text-slate-400">Difference</p>
+                  <p
+                    className={`mt-2 text-2xl font-bold ${
+                      reconciliationStatus === "Balanced"
+                        ? "text-emerald-300"
+                        : reconciliationStatus === "Short"
+                        ? "text-red-300"
+                        : "text-amber-300"
+                    }`}
+                  >
+                    GHC {money(reconciliationDifference)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={handleSaveReconciliation}
+                  disabled={reconSaving || reconLoading || isReconLocked}
+                >
+                  {reconSaving
+                    ? "Saving..."
+                    : existingReconciliationId
+                    ? "Update Closing Record"
+                    : "Save Closing Record"}
+                </Button>
+
+                <Button
+                  variant="outline"
+                  onClick={() => void loadExistingReconciliation()}
+                  disabled={reconLoading}
+                >
+                  {reconLoading ? "Loading..." : "Reload Saved Record"}
+                </Button>
+
+                <Button
+                  variant="outline"
+                  onClick={() => void printClosingSlip()}
+                  disabled={!scopedBranchId}
+                >
+                  Print Closing Slip
+                </Button>
+              </div>
+
+              <div className="rounded-lg border border-slate-700 bg-slate-800/40 p-4 text-sm text-slate-300">
+                <p className="font-medium text-white mb-2">Formula</p>
+                <p>
+                  Expected Cash = Opening Float + Cash Sales Received − Approved Cash Returns −
+                  Approved Cash Expenses
+                </p>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {!scopedBranchId && (
         <Card className="bg-slate-800/50 border-slate-700">
           <CardHeader className="flex items-center justify-between">
             <CardTitle className="text-white flex items-center gap-2">
               <TrendingUp className="h-5 w-5" />
-              Branch Comparison (Selected period)
+              Branch Comparison
             </CardTitle>
-            <Button variant="outline" onClick={() => void fetchBranchComparison()} disabled={compareLoading}>
+            <Button
+              variant="outline"
+              onClick={() => void fetchBranchComparison()}
+              disabled={compareLoading}
+            >
               {compareLoading ? "Loading..." : "Refresh"}
             </Button>
           </CardHeader>
@@ -1367,13 +1694,7 @@ export default function Reports() {
               <TableBody>
                 {compareRows.map((r) => (
                   <TableRow key={r.branch_id} className="border-slate-700">
-                    <TableCell className="text-white">
-                      {r.branch_name}
-                      <div className="text-xs text-slate-500 mt-1">
-                        Returns: GHC {money(r.approved_returns)} • Expenses: GHC{" "}
-                        {money(r.approved_expenses)}
-                      </div>
-                    </TableCell>
+                    <TableCell className="text-white">{r.branch_name}</TableCell>
                     <TableCell className="text-slate-300 text-right">{r.total_sales}</TableCell>
                     <TableCell className="text-slate-300 text-right">
                       GHC {money(r.total_revenue)}

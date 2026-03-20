@@ -15,6 +15,7 @@ import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import NotFound from "./pages/NotFound";
 import POS from "./pages/POS";
+import ReconciliationHistory from "./pages/ReconciliationHistory";
 import Reports from "./pages/Reports";
 import ReturnedItems from "./pages/ReturnedItems";
 import Returns from "./pages/Returns";
@@ -391,14 +392,23 @@ function AppRoutes() {
         }
       />
 
-      <Route
-        path="/reports"
-        element={
-          <RoleProtectedRoute allowedRoles={["admin"]}>
-            <Reports />
-          </RoleProtectedRoute>
-        }
-      />
+     <Route
+  path="/reports"
+  element={
+    <RoleProtectedRoute allowedRoles={["admin"]}>
+      <Reports />
+    </RoleProtectedRoute>
+  }
+/>
+
+<Route
+  path="/reconciliation-history"
+  element={
+    <RoleProtectedRoute allowedRoles={["admin"]}>
+      <ReconciliationHistory />
+    </RoleProtectedRoute>
+  }
+/>
 
       <Route
         path="/expenses"

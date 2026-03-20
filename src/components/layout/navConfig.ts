@@ -58,7 +58,7 @@ export const navigation: NavItem[] = [
     roles: ["admin", "cashier"],
   },
 
-  // ✅ NEW: Customer Payments / Debts
+  // Customer Payments / Debts
   {
     name: "Customer Payments",
     href: "/customer-payments",
@@ -140,13 +140,19 @@ export const navigation: NavItem[] = [
     allowReturnsHandler: true,
   },
 
-  // Reports
+  // ✅ UPDATED: Financial Report (was "Reports")
   {
-    name: "Reports",
-    href: "/reports",
+    name: "Financial Report",
+    href: "/reports", // keep same route
     icon: BarChart3,
     roles: ["admin"],
   },
+  {
+  name: "Reconciliation History",
+  href: "/reconciliation-history",
+  icon: Wallet,
+  roles: ["admin"],
+},
 
   // Settings
   {
