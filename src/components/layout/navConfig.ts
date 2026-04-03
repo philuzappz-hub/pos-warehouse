@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  BookAIcon,
   ClipboardList,
   Clock,
   FileCheck,
@@ -108,7 +109,60 @@ export const navigation: NavItem[] = [
     icon: Package,
     roles: ["admin"],
   },
+{
+  name: "Suppliers",
+  href: "/suppliers",
+  icon: Users,
+  roles: ["admin", "warehouse"],
+  
+},
+{
+  name: "Supplier Statement",
+  href: "/suppliers/statement",
+  icon: FileText,
+  roles: ["admin", "warehouse"],
+},
 
+{
+  name: "Supplier Payments",
+  href: "/suppliers/payments",
+  icon: Wallet,
+  roles: ["admin", "warehouse"],
+  
+},
+{
+  name: "Supplier summary",
+  href: "/suppliers/summary",
+  icon: BookAIcon,
+  roles: ["admin", "warehouse"],
+  
+},
+
+{
+  name: "Purchases",
+  href: "/purchases",
+  icon: Package,
+  roles: ["admin", "warehouse"],
+},
+{
+  name: "New Purchase",
+  href: "/purchases/new",
+  icon: Package,
+  roles: ["admin", "warehouse"],
+},
+
+{
+  name: "Payment Statement",
+  href: "/suppliers/payment-statement",
+  icon: FileText,
+  roles: ["admin", "warehouse"],
+},
+{
+  name: "Stock Statement",
+  href: "/suppliers/stock-statement",
+  icon: FileText,
+  roles: ["admin", "warehouse"],
+},
   {
     name: "Returns",
     href: "/returns",
