@@ -33,7 +33,6 @@ export type PurchaseFormValues = {
   discount_amount: string;
   tax_amount: string;
   other_charges: string;
-  amount_paid: string;
   notes: string;
 };
 
@@ -46,7 +45,6 @@ export const emptyPurchaseForm: PurchaseFormValues = {
   discount_amount: "0",
   tax_amount: "0",
   other_charges: "0",
-  amount_paid: "0",
   notes: "",
 };
 

@@ -75,6 +75,7 @@ export default function PurchaseItemsTable({
                         placeholder={loadingProducts ? "Loading products..." : "Select product"}
                       />
                     </SelectTrigger>
+
                     <SelectContent
                       position="popper"
                       className="z-[100] max-h-72 border-slate-700 bg-slate-900 text-white"

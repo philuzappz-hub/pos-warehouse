@@ -1,35 +1,35 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-    Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
-    DialogTrigger,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
 } from "@/components/ui/select";
 import type { BranchRow } from "@/features/reports/types";
 import SupplierStockStatementTable from "@/features/suppliers/components/SupplierStockStatementTable";
 import { money } from "@/features/suppliers/helpers";
 import {
-    buildSummaryCardHtml,
-    buildTableHtml,
-    openPrintFriendlyPdf,
-    shareReportViaWhatsApp,
+  buildSummaryCardHtml,
+  buildTableHtml,
+  openPrintFriendlyPdf,
+  shareReportViaWhatsApp,
 } from "@/features/suppliers/reportExport";
 import { fetchSuppliers } from "@/features/suppliers/services";
 import {
-    fetchSupplierStockStatement,
-    type SupplierStockStatementRow,
-    type SupplierStockStatementSummary,
+  fetchSupplierStockStatement,
+  type SupplierStockStatementRow,
+  type SupplierStockStatementSummary,
 } from "@/features/suppliers/services_stock_statement";
 import type { SupplierRow } from "@/features/suppliers/types";
 import { useToast } from "@/hooks/use-toast";
@@ -217,6 +217,7 @@ export default function SupplierStockStatement() {
         productId: productId === "all" ? null : productId,
         startDate: startDate || null,
         endDate: endDate || null,
+        stockStatus: "received",
       });
 
       setRows(result.rows);
@@ -433,7 +434,7 @@ export default function SupplierStockStatement() {
             Supplier Stock Statement
           </h1>
           <p className="text-slate-300">
-            Review stock received from suppliers for the selected period.
+            Review stock that has been received and approved from suppliers for the selected period.
           </p>
         </div>
 
@@ -604,7 +605,7 @@ export default function SupplierStockStatement() {
       <Card className="border-slate-600 bg-slate-900 shadow-lg shadow-black/20">
         <CardHeader>
           <CardTitle className="text-xl text-white">
-            Stock Receipt Transactions {loading ? "• Loading..." : ""}
+            Approved Stock Receipt Transactions {loading ? "• Loading..." : ""}
           </CardTitle>
         </CardHeader>
         <CardContent>

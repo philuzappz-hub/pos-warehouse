@@ -28,7 +28,7 @@ export default function PurchasesTable({ purchases, branches }: Props) {
 
   return (
     <div className="overflow-x-auto rounded-lg border border-slate-600 bg-slate-900 shadow-sm">
-      <table className="w-full min-w-[1300px]">
+      <table className="w-full min-w-[1400px]">
         <thead className="bg-slate-800">
           <tr className="border-b border-slate-700">
             <th className="px-3 py-3 text-left text-sm font-semibold text-slate-200">Date</th>
@@ -42,60 +42,89 @@ export default function PurchasesTable({ purchases, branches }: Props) {
             <th className="px-3 py-3 text-right text-sm font-semibold text-slate-200">Overpay</th>
             <th className="px-3 py-3 text-left text-sm font-semibold text-slate-200">Payment</th>
             <th className="px-3 py-3 text-left text-sm font-semibold text-slate-200">Stock</th>
-            <th className="px-3 py-3 text-right text-sm font-semibold text-slate-200">Action</th>
+            <th className="px-3 py-3 text-right text-sm font-semibold text-slate-200">Actions</th>
           </tr>
         </thead>
 
         <tbody>
-          {purchases.map((purchase) => (
-            <tr key={purchase.id} className="border-b border-slate-700 last:border-b-0 hover:bg-slate-800/60">
-              <td className="px-3 py-3 text-slate-200">{purchase.purchase_date}</td>
-              <td className="px-3 py-3 text-white">
-                <div className="font-semibold">{purchase.supplier?.name || "-"}</div>
-                {purchase.supplier?.supplier_code ? (
-                  <div className="text-xs text-slate-400">{purchase.supplier.supplier_code}</div>
-                ) : null}
-              </td>
-              <td className="px-3 py-3 text-slate-200">{purchase.invoice_number || "-"}</td>
-              <td className="px-3 py-3 text-slate-200">{purchase.reference_number || "-"}</td>
-              <td className="px-3 py-3 text-slate-200">{getBranchName(purchase.branch_id)}</td>
-              <td className="px-3 py-3 text-right text-slate-100">
-                GHS {money(purchase.total_amount)}
-              </td>
-              <td className="px-3 py-3 text-right text-emerald-300">
-                GHS {money(purchase.amount_paid)}
-              </td>
-              <td className="px-3 py-3 text-right text-amber-300">
-                GHS {money(purchase.balance_due)}
-              </td>
-              <td className="px-3 py-3 text-right text-cyan-300">
-                GHS {money(purchase.overpayment_amount || 0)}
-              </td>
-              <td className="px-3 py-3">
-                <span
-                  className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getPaymentBadgeClass(
-                    purchase.payment_status
-                  )}`}
-                >
-                  {purchase.payment_status}
-                </span>
-              </td>
-              <td className="px-3 py-3">
-                <span
-                  className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getStockBadgeClass(
-                    purchase.stock_status
-                  )}`}
-                >
-                  {purchase.stock_status}
-                </span>
-              </td>
-              <td className="px-3 py-3 text-right">
-                <Button asChild variant="outline" size="sm">
-                  <Link to={`/purchases/${purchase.id}`}>View</Link>
-                </Button>
-              </td>
-            </tr>
-          ))}
+          {purchases.map((purchase) => {
+            const canPay =
+              purchase.payment_status !== "paid" && Number(purchase.balance_due || 0) > 0;
+
+            return (
+              <tr
+                key={purchase.id}
+                className="border-b border-slate-700 last:border-b-0 hover:bg-slate-800/60"
+              >
+                <td className="px-3 py-3 text-slate-200">{purchase.purchase_date}</td>
+
+                <td className="px-3 py-3 text-white">
+                  <div className="font-semibold">{purchase.supplier?.name || "-"}</div>
+                  {purchase.supplier?.supplier_code ? (
+                    <div className="text-xs text-slate-400">{purchase.supplier.supplier_code}</div>
+                  ) : null}
+                </td>
+
+                <td className="px-3 py-3 text-slate-200">{purchase.invoice_number || "-"}</td>
+                <td className="px-3 py-3 text-slate-200">{purchase.reference_number || "-"}</td>
+                <td className="px-3 py-3 text-slate-200">{getBranchName(purchase.branch_id)}</td>
+
+                <td className="px-3 py-3 text-right text-slate-100">
+                  GHS {money(purchase.total_amount)}
+                </td>
+
+                <td className="px-3 py-3 text-right text-emerald-300">
+                  GHS {money(purchase.amount_paid)}
+                </td>
+
+                <td className="px-3 py-3 text-right text-amber-300">
+                  GHS {money(purchase.balance_due)}
+                </td>
+
+                <td className="px-3 py-3 text-right text-cyan-300">
+                  GHS {money(purchase.overpayment_amount || 0)}
+                </td>
+
+                <td className="px-3 py-3">
+                  <span
+                    className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold capitalize ${getPaymentBadgeClass(
+                      purchase.payment_status
+                    )}`}
+                  >
+                    {purchase.payment_status}
+                  </span>
+                </td>
+
+                <td className="px-3 py-3">
+                  <span
+                    className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold capitalize ${getStockBadgeClass(
+                      purchase.stock_status
+                    )}`}
+                  >
+                    {purchase.stock_status}
+                  </span>
+                </td>
+
+                <td className="px-3 py-3 text-right">
+                  <div className="flex justify-end gap-2">
+                    <Button asChild variant="outline" size="sm">
+                      <Link to={`/purchases/${purchase.id}`}>View Details</Link>
+                    </Button>
+
+                    {canPay && (
+                      <Button asChild size="sm">
+                        <Link
+                          to={`/suppliers/payments?supplierId=${purchase.supplier_id}&purchaseId=${purchase.id}`}
+                        >
+                          Pay Order
+                        </Link>
+                      </Button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
 
           {purchases.length === 0 && (
             <tr>

@@ -39,18 +39,14 @@ type PurchaseBalanceRow = {
   stock_status?: string | null;
 };
 
-type PaymentBalanceRow = {
+type SupplierPaymentBalanceRow = {
   id: string;
-  payment_date: string;
-  reference_number: string | null;
+  payment_date: string | null;
+  created_at?: string | null;
   amount: number | string | null;
-  notes: string | null;
-  purchase_id: string | null;
   allocated_amount: number | string | null;
   unallocated_amount: number | string | null;
-  allocation_status: string | null;
-  payment_method: string | null;
-  created_at?: string | null;
+  allocation_status?: string | null;
 };
 
 type SnapshotRpcRow = {
@@ -65,6 +61,38 @@ type SnapshotRpcRow = {
   available_credit: number | string | null;
   net_payable: number | string | null;
   closing_balance: number | string | null;
+};
+
+export type SupplierAutoSettlePreview = {
+  outstandingAmount: number;
+  paymentAmount: number;
+  willAllocate: number;
+  willRemainAsCredit: number;
+};
+
+export type SupplierAutoSettleResult = {
+  allocatedTotal: number;
+  remainingCredit: number;
+  allocationsCount: number;
+};
+
+export type SupplierCreditApplyResult = {
+  success: boolean;
+  message: string;
+  appliedAmount: number;
+  allocationCount: number;
+  remainingBalance: number;
+};
+
+type SupplierPaymentCreateArgs = {
+  companyId: string;
+  userId: string | null;
+  values: SupplierPaymentFormValues;
+};
+
+type EntrySeed = Omit<SupplierStatementEntry, "running_balance"> & {
+  sortKey?: string;
+  affects_running_balance?: boolean;
 };
 
 function toMoney(value: unknown) {
@@ -90,6 +118,106 @@ function statementTypeOrder(entryType: SupplierStatementEntry["entry_type"]) {
     default:
       return 99;
   }
+}
+
+function sortOpenPurchasesOldestFirst<T extends { purchase_date: string; id: string }>(rows: T[]) {
+  return [...rows].sort((a, b) => {
+    if (a.purchase_date !== b.purchase_date) {
+      return String(a.purchase_date).localeCompare(String(b.purchase_date));
+    }
+    return String(a.id).localeCompare(String(b.id));
+  });
+}
+
+async function getPurchaseBalanceForPayment(args: {
+  companyId: string;
+  purchaseId: string;
+  supplierId: string;
+}) {
+  const { companyId, purchaseId, supplierId } = args;
+
+  const { data: purchase, error: purchaseReadError } = await (supabase as any)
+    .from("supplier_purchase_balance_view")
+    .select("id,company_id,supplier_id,computed_balance_due")
+    .eq("company_id", companyId)
+    .eq("id", purchaseId)
+    .single();
+
+  if (purchaseReadError) throw purchaseReadError;
+  if (!purchase) throw new Error("Selected purchase was not found.");
+  if (String(purchase.supplier_id) !== String(supplierId)) {
+    throw new Error("Selected purchase does not belong to the chosen supplier.");
+  }
+
+  return {
+    purchaseId: String(purchase.id),
+    currentBalance: roundMoney(safeNumber(purchase.computed_balance_due)),
+  };
+}
+
+async function insertSupplierPayment(args: SupplierPaymentCreateArgs) {
+  const { companyId, userId, values } = args;
+
+  const paymentAmount = roundMoney(safeNumber(values.amount));
+  const purchaseId = values.purchase_id === "none" ? null : values.purchase_id;
+
+  if (paymentAmount <= 0) {
+    throw new Error("Payment amount must be greater than zero.");
+  }
+
+  if (purchaseId) {
+    const { currentBalance } = await getPurchaseBalanceForPayment({
+      companyId,
+      purchaseId,
+      supplierId: values.supplier_id,
+    });
+
+    if (paymentAmount > currentBalance) {
+      throw new Error(
+        `Payment amount cannot exceed purchase balance. Current balance is ${currentBalance}.`
+      );
+    }
+  }
+
+  const payload = {
+    company_id: companyId,
+    branch_id: values.branch_id,
+    supplier_id: values.supplier_id,
+    purchase_id: purchaseId,
+    payment_date: values.payment_date,
+    amount: paymentAmount,
+    payment_method: normalizeText(values.payment_method),
+    reference_number: normalizeOptionalText(values.reference_number),
+    notes: normalizeOptionalText(values.notes),
+    recorded_by: userId,
+  };
+
+  const { data, error } = await (supabase as any)
+    .from("supplier_payments")
+    .insert(payload)
+    .select(`
+      *,
+      supplier:suppliers(id,name,supplier_code)
+    `)
+    .single();
+
+  if (error) throw error;
+
+  if (purchaseId) {
+    const { error: allocationError } = await (supabase as any).rpc(
+      "apply_supplier_payment_allocation",
+      {
+        p_supplier_payment_id: data.id,
+        p_purchase_id: purchaseId,
+        p_allocated_amount: paymentAmount,
+        p_notes: normalizeOptionalText(values.notes) || "Direct payment allocation",
+      }
+    );
+
+    if (allocationError) throw allocationError;
+  }
+
+  return data as SupplierPaymentRow;
 }
 
 export async function fetchSuppliers(args: {
@@ -228,6 +356,28 @@ export async function fetchSupplierAccountSnapshot(args: {
   };
 }
 
+export async function applyAvailableCreditToPurchase(args: {
+  purchaseId: string;
+}): Promise<SupplierCreditApplyResult> {
+  const { purchaseId } = args;
+
+  const { data, error } = await (supabase as any).rpc("apply_supplier_credit_to_purchase", {
+    p_purchase_id: purchaseId,
+  });
+
+  if (error) throw error;
+
+  const row = (data ?? {}) as any;
+
+  return {
+    success: Boolean(row.success),
+    message: String(row.message ?? ""),
+    appliedAmount: toMoney(row.applied_amount),
+    allocationCount: toMoney(row.allocation_count),
+    remainingBalance: toMoney(row.remaining_balance),
+  };
+}
+
 export async function fetchSupplierStatement(args: {
   companyId: string;
   supplierId: string;
@@ -272,7 +422,28 @@ export async function fetchSupplierStatement(args: {
   const { data: purchases, error: purchasesError } = await purchasesQuery;
   if (purchasesError) throw purchasesError;
 
-  type EntrySeed = Omit<SupplierStatementEntry, "running_balance">;
+  let paymentBalanceQuery = (supabase as any)
+    .from("supplier_payment_balance_view")
+    .select(`
+      id,
+      payment_date,
+      created_at,
+      amount,
+      allocated_amount,
+      unallocated_amount,
+      allocation_status
+    `)
+    .eq("company_id", companyId)
+    .eq("supplier_id", supplierId)
+    .order("payment_date", { ascending: true })
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (startDate) paymentBalanceQuery = paymentBalanceQuery.gte("payment_date", startDate);
+  if (endDate) paymentBalanceQuery = paymentBalanceQuery.lte("payment_date", endDate);
+
+  const { data: paymentBalances, error: paymentBalancesError } = await paymentBalanceQuery;
+  if (paymentBalancesError) throw paymentBalancesError;
 
   const seeds: EntrySeed[] = [];
   const openingBalance = toMoney((supplier as any)?.opening_balance);
@@ -286,6 +457,8 @@ export async function fetchSupplierStatement(args: {
       description: "Opening supplier balance",
       debit: openingBalance > 0 ? openingBalance : 0,
       credit: openingBalance < 0 ? Math.abs(openingBalance) : 0,
+      sortKey: "0000",
+      affects_running_balance: true,
     });
   }
 
@@ -303,20 +476,35 @@ export async function fetchSupplierStatement(args: {
       description: "Purchase recorded",
       debit: purchaseAmount,
       credit: 0,
+      sortKey: `purchase-${row.id}`,
+      affects_running_balance: true,
     });
 
     if (cashApplied > 0) {
       seeds.push({
-        id: `payment-${row.id}`,
+        id: `payment-allocated-${row.id}`,
         entry_type: "payment",
         entry_date: row.purchase_date,
         reference,
-        description: "Cash applied to purchase",
+        description: "Payment allocated to purchase",
         debit: 0,
         credit: cashApplied,
+        sortKey: `payment-allocated-${row.id}`,
+        affects_running_balance: true,
       });
     }
 
+    /**
+     * IMPORTANT:
+     * Keep Credit Applied visible in the ledger for audit/history,
+     * but DO NOT let it reduce running balance again.
+     *
+     * Why:
+     * Once payment allocations and purchase balances are already reflected,
+     * subtracting supplier_credit_applied again causes the ledger to show
+     * fake negative balances like "supplier owes you", even though the credit
+     * has already been consumed.
+     */
     if (creditApplied > 0) {
       seeds.push({
         id: `credit-applied-${row.id}`,
@@ -326,21 +514,60 @@ export async function fetchSupplierStatement(args: {
         description: "Supplier credit applied to purchase",
         debit: 0,
         credit: creditApplied,
+        sortKey: `credit-applied-${row.id}`,
+        affects_running_balance: false,
       });
     }
   }
 
+  for (const payment of (paymentBalances ?? []) as SupplierPaymentBalanceRow[]) {
+    const unallocatedAmount = toMoney(payment.unallocated_amount);
+    if (unallocatedAmount <= 0) continue;
+
+    const paymentDate = String(payment.payment_date || "");
+    const paymentId = String(payment.id || "");
+    const createdAt = String(payment.created_at || "");
+
+    seeds.push({
+      id: `payment-unallocated-${paymentId}`,
+      entry_type: "payment",
+      entry_date: paymentDate,
+      reference: "Payment Credit",
+      description: "General supplier payment kept as available credit",
+      debit: 0,
+      credit: unallocatedAmount,
+      sortKey: `payment-unallocated-${paymentDate}-${createdAt}-${paymentId}`,
+      affects_running_balance: true,
+    });
+  }
+
   seeds.sort((a, b) => {
     if (a.entry_date !== b.entry_date) return a.entry_date.localeCompare(b.entry_date);
+
     const typeCompare = statementTypeOrder(a.entry_type) - statementTypeOrder(b.entry_type);
     if (typeCompare !== 0) return typeCompare;
-    return a.id.localeCompare(b.id);
+
+    return String(a.sortKey || a.id).localeCompare(String(b.sortKey || b.id));
   });
 
   let runningBalance = 0;
   const entries: SupplierStatementEntry[] = seeds.map((entry) => {
-    runningBalance = toMoney(runningBalance + toMoney(entry.debit) - toMoney(entry.credit));
-    return { ...entry, running_balance: runningBalance };
+    const affectsRunningBalance = entry.affects_running_balance !== false;
+
+    if (affectsRunningBalance) {
+      runningBalance = toMoney(runningBalance + toMoney(entry.debit) - toMoney(entry.credit));
+    }
+
+    return {
+      id: entry.id,
+      entry_type: entry.entry_type,
+      entry_date: entry.entry_date,
+      reference: entry.reference,
+      description: entry.description,
+      debit: toMoney(entry.debit),
+      credit: toMoney(entry.credit),
+      running_balance: runningBalance,
+    };
   });
 
   return {
@@ -380,81 +607,121 @@ export async function fetchSupplierPayments(args: {
   return (data ?? []) as SupplierPaymentRow[];
 }
 
-export async function createSupplierPayment(args: {
+export async function createSupplierPayment(args: SupplierPaymentCreateArgs) {
+  return insertSupplierPayment(args);
+}
+
+export async function previewGeneralSupplierPaymentSettlement(args: {
   companyId: string;
-  userId: string | null;
-  values: SupplierPaymentFormValues;
+  supplierId: string;
+  amount: number | string;
 }) {
+  const { companyId, supplierId, amount } = args;
+
+  const paymentAmount = toMoney(amount);
+  if (paymentAmount <= 0) {
+    return {
+      outstandingAmount: 0,
+      paymentAmount: 0,
+      willAllocate: 0,
+      willRemainAsCredit: 0,
+    } satisfies SupplierAutoSettlePreview;
+  }
+
+  const snapshot = await fetchSupplierAccountSnapshot({ companyId, supplierId });
+  const outstandingAmount = Math.max(toMoney(snapshot.netPayable), 0);
+  const willAllocate = Math.min(outstandingAmount, paymentAmount);
+  const willRemainAsCredit = Math.max(paymentAmount - outstandingAmount, 0);
+
+  return {
+    outstandingAmount,
+    paymentAmount,
+    willAllocate,
+    willRemainAsCredit,
+  } satisfies SupplierAutoSettlePreview;
+}
+
+export async function createGeneralSupplierPaymentWithAutoSettle(args: SupplierPaymentCreateArgs) {
   const { companyId, userId, values } = args;
 
-  const paymentAmount = roundMoney(safeNumber(values.amount));
-  const purchaseId = values.purchase_id === "none" ? null : values.purchase_id;
+  if (values.purchase_id !== "none") {
+    throw new Error("Auto-settle flow only supports general supplier payments.");
+  }
 
+  const paymentAmount = toMoney(values.amount);
   if (paymentAmount <= 0) {
     throw new Error("Payment amount must be greater than zero.");
   }
 
-  if (purchaseId) {
-    const { data: purchase, error: purchaseReadError } = await (supabase as any)
-      .from("supplier_purchase_balance_view")
-      .select("id,company_id,supplier_id,computed_balance_due")
-      .eq("company_id", companyId)
-      .eq("id", purchaseId)
-      .single();
+  const latestOpenPurchases = sortOpenPurchasesOldestFirst(
+    (await fetchSupplierOpenPurchases({
+      companyId,
+      supplierId: values.supplier_id,
+    })) as Array<{
+      id: string;
+      branch_id?: string | null;
+      purchase_date: string;
+      invoice_number: string | null;
+      reference_number: string | null;
+      total_amount: number;
+      amount_paid?: number;
+      supplier_credit_applied: number;
+      balance_due: number;
+    }>
+  );
 
-    if (purchaseReadError) throw purchaseReadError;
-    if (!purchase) throw new Error("Selected purchase was not found.");
-    if (String(purchase.supplier_id) !== String(values.supplier_id)) {
-      throw new Error("Selected purchase does not belong to the chosen supplier.");
-    }
+  let remaining = paymentAmount;
+  let allocatedTotal = 0;
+  let allocationsCount = 0;
 
-    const currentBalance = roundMoney(safeNumber(purchase.computed_balance_due));
-    if (paymentAmount > currentBalance) {
-      throw new Error(
-        `Payment amount cannot exceed purchase balance. Current balance is ${currentBalance}.`
-      );
-    }
+  for (const purchase of latestOpenPurchases) {
+    if (remaining <= 0) break;
+
+    const purchaseBalance = toMoney(purchase.balance_due);
+    if (purchaseBalance <= 0) continue;
+
+    const chunk = Math.min(remaining, purchaseBalance);
+    if (chunk <= 0) continue;
+
+    await insertSupplierPayment({
+      companyId,
+      userId,
+      values: {
+        ...values,
+        branch_id: purchase.branch_id || values.branch_id,
+        purchase_id: purchase.id,
+        amount: String(chunk),
+        notes: values.notes
+          ? `${values.notes} • Auto-settled from general payment`
+          : "Auto-settled from general payment",
+      },
+    });
+
+    remaining = toMoney(remaining - chunk);
+    allocatedTotal = toMoney(allocatedTotal + chunk);
+    allocationsCount += 1;
   }
 
-  const payload = {
-    company_id: companyId,
-    branch_id: values.branch_id,
-    supplier_id: values.supplier_id,
-    purchase_id: purchaseId,
-    payment_date: values.payment_date,
-    amount: paymentAmount,
-    payment_method: normalizeText(values.payment_method),
-    reference_number: normalizeOptionalText(values.reference_number),
-    notes: normalizeOptionalText(values.notes),
-    recorded_by: userId,
-  };
-
-  const { data, error } = await (supabase as any)
-    .from("supplier_payments")
-    .insert(payload)
-    .select(`
-      *,
-      supplier:suppliers(id,name,supplier_code)
-    `)
-    .single();
-
-  if (error) throw error;
-
-  if (purchaseId) {
-    const { error: allocationError } = await (supabase as any).rpc(
-      "apply_supplier_payment_allocation",
-      {
-        p_supplier_payment_id: data.id,
-        p_purchase_id: purchaseId,
-        p_allocated_amount: paymentAmount,
-        p_notes: normalizeOptionalText(values.notes) || "Direct payment allocation",
-      }
-    );
-
-    if (allocationError) throw allocationError;
+  if (remaining > 0) {
+    await insertSupplierPayment({
+      companyId,
+      userId,
+      values: {
+        ...values,
+        purchase_id: "none",
+        amount: String(remaining),
+        notes: values.notes
+          ? `${values.notes} • Remaining kept as supplier credit`
+          : "Remaining kept as supplier credit",
+      },
+    });
   }
 
-  return data as SupplierPaymentRow;
+  return {
+    allocatedTotal,
+    remainingCredit: remaining,
+    allocationsCount,
+  } satisfies SupplierAutoSettleResult;
 }
 
 export async function fetchSupplierOpenPurchases(args: {
@@ -467,6 +734,7 @@ export async function fetchSupplierOpenPurchases(args: {
     .from("supplier_purchase_balance_view")
     .select(`
       id,
+      branch_id,
       purchase_date,
       invoice_number,
       reference_number,
@@ -484,6 +752,7 @@ export async function fetchSupplierOpenPurchases(args: {
 
   return (data ?? []).map((row: any) => ({
     id: row.id,
+    branch_id: row.branch_id || null,
     purchase_date: row.purchase_date,
     invoice_number: row.invoice_number,
     reference_number: row.reference_number,

@@ -16,14 +16,18 @@ type DisplayRow = {
   balance_due: number;
   supplier_credit: number;
 
-  cash_applied: number;
-  credit_applied: number;
-  net_payments: number;
+  cash_payments: number;
+  credit_used: number;
+  total_settled: number;
 };
 
 function num(value: unknown) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n : 0;
+}
+
+function roundMoney(value: number) {
+  return Math.round((num(value) + Number.EPSILON) * 100) / 100;
 }
 
 export default function SupplierSummary() {
@@ -48,21 +52,23 @@ export default function SupplierSummary() {
 
       const results = await Promise.all(
         suppliers.map(async (supplier) => {
-          // ✅ IMPORTANT: pass branchId into snapshot
           const snapshot = await fetchSupplierAccountSnapshot({
             companyId,
             supplierId: supplier.id,
-             // 🔥 FIX
           });
 
-          // ✅ DIRECT VALUES FROM SNAPSHOT (NO DERIVATION)
-          const balanceDue = num(snapshot?.netPayable);
-          const supplierCredit = num(snapshot?.availableCredit);
-          const creditApplied = num(snapshot?.totalCreditsApplied);
+          const totalPurchases = num(snapshot?.totalPurchases);
           const totalPayments = num(snapshot?.totalPayments);
+          const creditUsed = num(snapshot?.totalCreditsApplied);
+          const availableCredit = num(snapshot?.availableCredit);
 
-          // ✅ CASH = actual payments only (NOT derived)
-          const cashApplied = Math.max(totalPayments, 0);
+          const totalSettled = roundMoney(totalPayments + creditUsed);
+          const grossOutstanding = roundMoney(
+            Math.max(totalPurchases - totalSettled, 0)
+          );
+          const balanceDue = roundMoney(
+            Math.max(grossOutstanding - availableCredit, 0)
+          );
 
           return {
             supplier_id: supplier.id,
@@ -70,11 +76,11 @@ export default function SupplierSummary() {
             supplier_code: supplier.supplier_code || null,
 
             balance_due: balanceDue,
-            supplier_credit: supplierCredit,
+            supplier_credit: roundMoney(availableCredit),
 
-            cash_applied: cashApplied,
-            credit_applied: creditApplied,
-            net_payments: cashApplied + creditApplied,
+            cash_payments: roundMoney(Math.max(totalPayments, 0)),
+            credit_used: roundMoney(creditUsed),
+            total_settled: roundMoney(totalSettled),
           };
         })
       );
@@ -100,17 +106,17 @@ export default function SupplierSummary() {
       (acc, row) => {
         acc.totalPayables += num(row.balance_due);
         acc.totalCredits += num(row.supplier_credit);
-        acc.cashApplied += num(row.cash_applied);
-        acc.creditApplied += num(row.credit_applied);
-        acc.netPayments += num(row.net_payments);
+        acc.cashPayments += num(row.cash_payments);
+        acc.creditUsed += num(row.credit_used);
+        acc.totalSettled += num(row.total_settled);
         return acc;
       },
       {
         totalPayables: 0,
         totalCredits: 0,
-        cashApplied: 0,
-        creditApplied: 0,
-        netPayments: 0,
+        cashPayments: 0,
+        creditUsed: 0,
+        totalSettled: 0,
       }
     );
   }, [rows]);
@@ -122,11 +128,10 @@ export default function SupplierSummary() {
           Supplier Summary
         </h1>
         <p className="text-slate-300">
-          Clean snapshot-driven supplier balances (fully reconciled).
+          Reconciled snapshot-driven supplier balances.
         </p>
       </div>
 
-      {/* CARDS */}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <Card className="border-red-500/35 bg-red-500/10">
           <CardHeader className="pb-2">
@@ -157,12 +162,12 @@ export default function SupplierSummary() {
         <Card className="border-slate-600 bg-slate-900">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-slate-300">
-              Cash Applied
+              Cash Payments
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-cyan-300">
-              GHS {money(totals.cashApplied)}
+              GHS {money(totals.cashPayments)}
             </div>
           </CardContent>
         </Card>
@@ -170,12 +175,12 @@ export default function SupplierSummary() {
         <Card className="border-slate-600 bg-slate-900">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-slate-300">
-              Credit Applied
+              Credit Used
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-sky-300">
-              GHS {money(totals.creditApplied)}
+              GHS {money(totals.creditUsed)}
             </div>
           </CardContent>
         </Card>
@@ -183,18 +188,17 @@ export default function SupplierSummary() {
         <Card className="border-slate-600 bg-slate-900">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-slate-300">
-              Net Payments
+              Total Settled
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-emerald-300">
-              GHS {money(totals.netPayments)}
+              GHS {money(totals.totalSettled)}
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* TABLE */}
       <Card className="border-slate-600 bg-slate-900">
         <CardHeader>
           <CardTitle className="text-2xl text-white">
@@ -210,9 +214,9 @@ export default function SupplierSummary() {
                   <th className="px-4 py-3 text-left text-white">Supplier</th>
                   <th className="px-4 py-3 text-right text-white">Payable</th>
                   <th className="px-4 py-3 text-right text-white">Credit</th>
-                  <th className="px-4 py-3 text-right text-white">Cash</th>
+                  <th className="px-4 py-3 text-right text-white">Cash Payments</th>
                   <th className="px-4 py-3 text-right text-white">Credit Used</th>
-                  <th className="px-4 py-3 text-right text-white">Total Paid</th>
+                  <th className="px-4 py-3 text-right text-white">Total Settled</th>
                 </tr>
               </thead>
 
@@ -232,22 +236,22 @@ export default function SupplierSummary() {
                     </td>
 
                     <td className="px-4 py-3 text-right text-cyan-300">
-                      GHS {money(r.cash_applied)}
+                      GHS {money(r.cash_payments)}
                     </td>
 
                     <td className="px-4 py-3 text-right text-sky-300">
-                      GHS {money(r.credit_applied)}
+                      GHS {money(r.credit_used)}
                     </td>
 
                     <td className="px-4 py-3 text-right text-emerald-300">
-                      GHS {money(r.net_payments)}
+                      GHS {money(r.total_settled)}
                     </td>
                   </tr>
                 ))}
 
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="text-center py-10 text-slate-400">
+                    <td colSpan={6} className="py-10 text-center text-slate-400">
                       {loading ? "Loading..." : "No data"}
                     </td>
                   </tr>

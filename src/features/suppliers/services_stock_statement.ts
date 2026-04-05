@@ -46,8 +46,17 @@ export async function fetchSupplierStockStatement(args: {
   productId?: string | null;
   startDate?: string | null;
   endDate?: string | null;
+  stockStatus?: string | null;
 }) {
-  const { companyId, supplierId, branchId, productId, startDate, endDate } = args;
+  const {
+    companyId,
+    supplierId,
+    branchId,
+    productId,
+    startDate,
+    endDate,
+    stockStatus,
+  } = args;
 
   let query = (supabase as any)
     .from("purchase_items")
@@ -80,28 +89,30 @@ export async function fetchSupplierStockStatement(args: {
   const { data, error } = await query;
   if (error) throw error;
 
-  let rows: SupplierStockStatementRow[] = (data ?? []).map((row: any) => ({
-    purchase_item_id: row.id,
-    purchase_id: row.purchase_id,
-    purchase_date: row?.purchase?.purchase_date,
-    supplier_id: row?.purchase?.supplier_id,
-    supplier_name: row?.purchase?.supplier?.name || "Unknown Supplier",
-    supplier_code: row?.purchase?.supplier?.supplier_code || null,
-    branch_id: row?.purchase?.branch_id || null,
-    branch_name: row?.purchase?.branch?.name || null,
+  let rows: SupplierStockStatementRow[] = (data ?? [])
+    .map((row: any) => ({
+      purchase_item_id: row.id,
+      purchase_id: row.purchase_id,
+      purchase_date: row?.purchase?.purchase_date,
+      supplier_id: row?.purchase?.supplier_id,
+      supplier_name: row?.purchase?.supplier?.name || "Unknown Supplier",
+      supplier_code: row?.purchase?.supplier?.supplier_code || null,
+      branch_id: row?.purchase?.branch_id || null,
+      branch_name: row?.purchase?.branch?.name || null,
 
-    product_id: row.product_id,
-    product_name: row?.product?.name || "Unknown Product",
+      product_id: row.product_id,
+      product_name: row?.product?.name || "Unknown Product",
 
-    quantity: roundMoney(row.quantity),
-    unit_cost: roundMoney(row.unit_cost),
-    line_discount: roundMoney(row.line_discount),
-    line_total: roundMoney(row.line_total),
+      quantity: roundMoney(row.quantity),
+      unit_cost: roundMoney(row.unit_cost),
+      line_discount: roundMoney(row.line_discount),
+      line_total: roundMoney(row.line_total),
 
-    invoice_number: row?.purchase?.invoice_number || null,
-    reference_number: row?.purchase?.reference_number || null,
-    stock_status: row?.purchase?.stock_status || null,
-  }));
+      invoice_number: row?.purchase?.invoice_number || null,
+      reference_number: row?.purchase?.reference_number || null,
+      stock_status: row?.purchase?.stock_status || null,
+    }))
+    .filter((row) => !!row.purchase_id);
 
   if (supplierId) {
     rows = rows.filter((row) => row.supplier_id === supplierId);
@@ -119,9 +130,16 @@ export async function fetchSupplierStockStatement(args: {
     rows = rows.filter((row) => row.purchase_date <= endDate);
   }
 
+  const normalizedStatus = String(stockStatus || "received").toLowerCase();
+  if (normalizedStatus !== "all") {
+    rows = rows.filter(
+      (row) => String(row.stock_status || "").toLowerCase() === normalizedStatus
+    );
+  }
+
   rows.sort((a, b) => {
     if (a.purchase_date !== b.purchase_date) {
-      return b.purchase_date.localeCompare(a.purchase_date);
+      return String(b.purchase_date).localeCompare(String(a.purchase_date));
     }
     return String(b.purchase_item_id).localeCompare(String(a.purchase_item_id));
   });

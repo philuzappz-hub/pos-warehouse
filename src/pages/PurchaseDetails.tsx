@@ -87,8 +87,8 @@ export default function PurchaseDetails() {
         <div>
           <h1 className="text-3xl font-bold text-white">Purchase Details</h1>
           <p className="text-slate-300">
-            Review supplier, totals, balances, credit usage, item lines, linked payments, and overpayment details.{" "}
-            {loading ? "Loading..." : ""}
+            Review order header, supplier, items, payment status, balances, and linked payments.
+            {loading ? " Loading..." : ""}
           </p>
         </div>
 
@@ -119,13 +119,15 @@ export default function PurchaseDetails() {
                 <CardTitle className="text-sm text-slate-300">Total Amount</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold text-white">GHS {money(purchase.total_amount)}</div>
+                <div className="text-2xl font-bold text-white">
+                  GHS {money(purchase.total_amount)}
+                </div>
               </CardContent>
             </Card>
 
             <Card className="border-slate-600 bg-slate-900 shadow-sm">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm text-slate-300">Applied Paid</CardTitle>
+                <CardTitle className="text-sm text-slate-300">Cash Applied</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold text-emerald-300">
@@ -158,11 +160,11 @@ export default function PurchaseDetails() {
 
             <Card className="border-slate-600 bg-slate-900 shadow-sm">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm text-slate-300">Overpayment</CardTitle>
+                <CardTitle className="text-sm text-slate-300">Outstanding Status</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold text-violet-300">
-                  GHS {money(purchase.overpayment_amount || 0)}
+                <div className="text-2xl font-bold text-violet-300 capitalize">
+                  {purchase.payment_status}
                 </div>
               </CardContent>
             </Card>
@@ -172,39 +174,47 @@ export default function PurchaseDetails() {
             <CardHeader>
               <CardTitle className="text-white">Purchase Header</CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 text-sm">
+            <CardContent className="grid gap-4 text-sm md:grid-cols-2 xl:grid-cols-4">
               <div>
                 <p className="text-slate-400">Supplier</p>
                 <p className="text-white">{purchase.supplier?.name || "-"}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Supplier Code</p>
                 <p className="text-white">{purchase.supplier?.supplier_code || "-"}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Branch</p>
                 <p className="text-white">{getBranchName(purchase.branch_id)}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Purchase Date</p>
                 <p className="text-white">{purchase.purchase_date}</p>
               </div>
+
               <div>
-                <p className="text-slate-400">Invoice Number</p>
+                <p className="text-slate-400">Order ID</p>
                 <p className="text-white">{purchase.invoice_number || "-"}</p>
               </div>
+
               <div>
-                <p className="text-slate-400">Reference Number</p>
+                <p className="text-slate-400">Supplier Reference</p>
                 <p className="text-white">{purchase.reference_number || "-"}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Stock Status</p>
                 <p className="text-white capitalize">{purchase.stock_status}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Payment Status</p>
                 <p className="text-white capitalize">{purchase.payment_status}</p>
               </div>
+
               <div className="md:col-span-2 xl:col-span-4">
                 <p className="text-slate-400">Notes</p>
                 <p className="text-white">{purchase.notes || "-"}</p>
@@ -215,27 +225,12 @@ export default function PurchaseDetails() {
           {(purchase.supplier_credit_applied || 0) > 0 && (
             <Card className="border-cyan-700/40 bg-cyan-500/10 shadow-sm">
               <CardHeader>
-                <CardTitle className="text-cyan-200">Supplier Credit Used</CardTitle>
+                <CardTitle className="text-cyan-200">Supplier Credit Applied</CardTitle>
               </CardHeader>
               <CardContent className="text-sm text-cyan-100">
-                Existing supplier credit was automatically applied to this purchase.
+                Credit was applied later through the supplier payment and allocation workflow.
                 <span className="ml-1 font-semibold">
                   GHS {money(purchase.supplier_credit_applied || 0)}
-                </span>
-              </CardContent>
-            </Card>
-          )}
-
-          {(purchase.overpayment_amount || 0) > 0 && (
-            <Card className="border-violet-700/40 bg-violet-500/10 shadow-sm">
-              <CardHeader>
-                <CardTitle className="text-violet-200">Overpayment Recorded</CardTitle>
-              </CardHeader>
-              <CardContent className="text-sm text-violet-100">
-                This purchase was paid above its remaining amount after supplier credit.
-                Extra amount recorded:
-                <span className="ml-1 font-semibold">
-                  GHS {money(purchase.overpayment_amount || 0)}
                 </span>
               </CardContent>
             </Card>
@@ -245,15 +240,17 @@ export default function PurchaseDetails() {
             <CardHeader>
               <CardTitle className="text-white">Supplier Contact</CardTitle>
             </CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 text-sm">
+            <CardContent className="grid gap-4 text-sm md:grid-cols-2 xl:grid-cols-4">
               <div>
                 <p className="text-slate-400">Contact Person</p>
                 <p className="text-white">{purchase.supplier?.contact_person || "-"}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Phone</p>
                 <p className="text-white">{purchase.supplier?.phone || "-"}</p>
               </div>
+
               <div>
                 <p className="text-slate-400">Email</p>
                 <p className="text-white">{purchase.supplier?.email || "-"}</p>
@@ -356,7 +353,7 @@ export default function PurchaseDetails() {
                           {payment.reference_number || "-"}
                         </td>
                         <td className="px-3 py-3 text-slate-200">{payment.notes || "-"}</td>
-                        <td className="px-3 py-3 text-right text-emerald-300 font-semibold">
+                        <td className="px-3 py-3 text-right font-semibold text-emerald-300">
                           GHS {money(payment.amount)}
                         </td>
                       </tr>

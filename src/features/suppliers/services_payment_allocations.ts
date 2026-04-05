@@ -1,9 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
 
-/** ================================
- * TYPES
- * ================================ */
-
 export type SupplierOpenPurchaseOption = {
   purchase_id: string;
   company_id: string;
@@ -75,19 +71,12 @@ function toNumber(value: unknown): number {
   return Number.isFinite(num) ? num : 0;
 }
 
-/** ================================
- * FETCH OPEN PURCHASES (FOR DIALOG)
- * ================================ */
-
 export async function fetchOpenSupplierPurchases(
   supplierId: string
 ): Promise<SupplierOpenPurchaseOption[]> {
-  const { data, error } = await (supabase as any).rpc(
-    "get_open_supplier_purchases",
-    {
-      p_supplier_id: supplierId,
-    }
-  );
+  const { data, error } = await (supabase as any).rpc("get_open_supplier_purchases", {
+    p_supplier_id: supplierId,
+  });
 
   if (error) {
     console.error("fetchOpenSupplierPurchases error:", error);
@@ -110,19 +99,12 @@ export async function fetchOpenSupplierPurchases(
   }));
 }
 
-/** ================================
- * FETCH PAYMENT ALLOCATION HISTORY
- * ================================ */
-
 export async function fetchSupplierPaymentAllocations(
   paymentId: string
 ): Promise<SupplierPaymentAllocationRow[]> {
-  const { data, error } = await (supabase as any).rpc(
-    "get_supplier_payment_allocations",
-    {
-      p_payment_id: paymentId,
-    }
-  );
+  const { data, error } = await (supabase as any).rpc("get_supplier_payment_allocations", {
+    p_payment_id: paymentId,
+  });
 
   if (error) {
     console.error("fetchSupplierPaymentAllocations error:", error);
@@ -148,19 +130,12 @@ export async function fetchSupplierPaymentAllocations(
   }));
 }
 
-/** ================================
- * FETCH SINGLE PAYMENT BALANCE
- * ================================ */
-
 export async function fetchSupplierPaymentBalance(
   paymentId: string
 ): Promise<SupplierPaymentBalanceRow | null> {
-  const { data, error } = await (supabase as any).rpc(
-    "get_supplier_payment_balance",
-    {
-      p_payment_id: paymentId,
-    }
-  );
+  const { data, error } = await (supabase as any).rpc("get_supplier_payment_balance", {
+    p_payment_id: paymentId,
+  });
 
   if (error) {
     console.error("fetchSupplierPaymentBalance error:", error);
@@ -187,40 +162,39 @@ export async function fetchSupplierPaymentBalance(
   };
 }
 
-/** ================================
- * AUTO ALLOCATE PAYMENT
- * ================================ */
-
 export async function autoAllocateSupplierPayment(
   paymentId: string
 ): Promise<AutoAllocateSupplierPaymentResult> {
-  const { data, error } = await (supabase as any).rpc(
-    "auto_allocate_supplier_payment",
-    {
-      p_payment_id: paymentId,
-    }
-  );
+  const before = await fetchSupplierPaymentBalance(paymentId);
+
+  const { data, error } = await (supabase as any).rpc("auto_allocate_supplier_payment", {
+    p_supplier_payment_id: paymentId,
+  });
 
   if (error) {
     console.error("autoAllocateSupplierPayment error:", error);
     throw error;
   }
 
-  const row = (data ?? {}) as any;
+  const after = await fetchSupplierPaymentBalance(paymentId);
+  const allocatedCount = toNumber(data);
+  const allocatedNow = Math.max(
+    0,
+    toNumber(before?.unallocated_amount) - toNumber(after?.unallocated_amount)
+  );
 
   return {
-    success: Boolean(row.success),
-    message: String(row.message ?? ""),
-    payment_id: String(row.payment_id ?? paymentId),
-    allocated_count: toNumber(row.allocated_count),
-    allocated_now: toNumber(row.allocated_now),
-    remaining_unallocated: toNumber(row.remaining_unallocated),
+    success: true,
+    message:
+      allocatedCount > 0
+        ? `Auto allocation completed. ${allocatedCount} purchase(s) updated.`
+        : "No open purchase balance was available for allocation.",
+    payment_id: paymentId,
+    allocated_count: allocatedCount,
+    allocated_now: allocatedNow,
+    remaining_unallocated: toNumber(after?.unallocated_amount),
   };
 }
-
-/** ================================
- * MANUAL ALLOCATION
- * ================================ */
 
 export async function allocateSupplierPaymentToPurchase(args: {
   paymentId: string;
@@ -228,15 +202,12 @@ export async function allocateSupplierPaymentToPurchase(args: {
   amount: number;
   notes?: string | null;
 }) {
-  const { data, error } = await (supabase as any).rpc(
-    "allocate_supplier_payment_to_purchase",
-    {
-      p_payment_id: args.paymentId,
-      p_purchase_id: args.purchaseId,
-      p_allocated_amount: args.amount,
-      p_notes: args.notes ?? null,
-    }
-  );
+  const { data, error } = await (supabase as any).rpc("allocate_supplier_payment_to_purchase", {
+    p_payment_id: args.paymentId,
+    p_purchase_id: args.purchaseId,
+    p_allocated_amount: args.amount,
+    p_notes: args.notes ?? null,
+  });
 
   if (error) {
     console.error("allocateSupplierPaymentToPurchase error:", error);
@@ -246,19 +217,12 @@ export async function allocateSupplierPaymentToPurchase(args: {
   return data;
 }
 
-/** ================================
- * REMOVE ALLOCATION
- * ================================ */
-
 export async function removeSupplierPaymentAllocation(
   allocationId: string
 ): Promise<RemoveSupplierPaymentAllocationResult> {
-  const { data, error } = await (supabase as any).rpc(
-    "remove_supplier_payment_allocation",
-    {
-      p_allocation_id: allocationId,
-    }
-  );
+  const { data, error } = await (supabase as any).rpc("remove_supplier_payment_allocation", {
+    p_allocation_id: allocationId,
+  });
 
   if (error) {
     console.error("removeSupplierPaymentAllocation error:", error);

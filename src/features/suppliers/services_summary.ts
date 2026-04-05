@@ -52,13 +52,9 @@ async function fetchSupplierSnapshot(args: {
 
   return {
     total_purchases: roundMoney(safeNumber(row?.total_purchases)),
-    outstanding_purchases: roundMoney(
-      safeNumber(row?.outstanding_purchases)
-    ),
+    outstanding_purchases: roundMoney(safeNumber(row?.outstanding_purchases)),
     total_payments: roundMoney(safeNumber(row?.total_payments)),
-    total_credits_applied: roundMoney(
-      safeNumber(row?.total_credits_applied)
-    ),
+    total_credits_applied: roundMoney(safeNumber(row?.total_credits_applied)),
     available_credit: roundMoney(safeNumber(row?.available_credit)),
   } as SnapshotRow;
 }
@@ -144,7 +140,6 @@ export async function fetchSupplierSummary(args: {
         days90: 0,
       };
 
-      // ✅ FIXED: Total Paid = Settled ONLY
       const totalPaid = roundMoney(
         snapshot.total_purchases - snapshot.outstanding_purchases
       );
@@ -156,7 +151,6 @@ export async function fetchSupplierSummary(args: {
 
         total_purchases: snapshot.total_purchases,
         total_paid: totalPaid,
-
         balance_due: snapshot.outstanding_purchases,
         supplier_credit: snapshot.available_credit,
 

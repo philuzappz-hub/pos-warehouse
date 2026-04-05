@@ -53,36 +53,14 @@ export function getPurchaseSubtotal(rows: PurchaseItemFormRow[]) {
   return roundMoney(rows.reduce((sum, row) => sum + getPurchaseLineTotal(row), 0));
 }
 
-export function getPurchaseTotals(
-  form: PurchaseFormValues,
-  rows: PurchaseItemFormRow[],
-  supplierCreditBalance = 0
-) {
+export function getPurchaseTotals(form: PurchaseFormValues, rows: PurchaseItemFormRow[]) {
   const subtotal = getPurchaseSubtotal(rows);
   const discountAmount = roundMoney(safeNumber(form.discount_amount));
   const taxAmount = roundMoney(safeNumber(form.tax_amount));
   const otherCharges = roundMoney(safeNumber(form.other_charges));
 
   const totalAmount = roundMoney(subtotal - discountAmount + taxAmount + otherCharges);
-
-  const rawAmountPaid = roundMoney(safeNumber(form.amount_paid));
-  const supplierCreditApplied = roundMoney(Math.min(supplierCreditBalance, totalAmount));
-
-  const remainingAfterCredit = roundMoney(Math.max(0, totalAmount - supplierCreditApplied));
-  const appliedCashAmount = roundMoney(Math.min(rawAmountPaid, remainingAfterCredit));
-  const effectivePaidAmount = roundMoney(supplierCreditApplied + appliedCashAmount);
-
-  const overpaymentAmount = roundMoney(Math.max(0, rawAmountPaid - remainingAfterCredit));
-  const balanceDue = roundMoney(Math.max(0, totalAmount - effectivePaidAmount));
-
-  let paymentStatus: "paid" | "partial" | "unpaid" = "unpaid";
-  if (totalAmount <= 0) {
-    paymentStatus = "unpaid";
-  } else if (effectivePaidAmount >= totalAmount) {
-    paymentStatus = "paid";
-  } else if (effectivePaidAmount > 0) {
-    paymentStatus = "partial";
-  }
+  const balanceDue = roundMoney(Math.max(0, totalAmount));
 
   return {
     subtotal,
@@ -90,13 +68,11 @@ export function getPurchaseTotals(
     taxAmount,
     otherCharges,
     totalAmount,
-    rawAmountPaid,
-    supplierCreditApplied,
-    appliedCashAmount,
-    effectivePaidAmount,
-    overpaymentAmount,
+    amountPaid: 0,
+    supplierCreditApplied: 0,
+    overpaymentAmount: 0,
     balanceDue,
-    paymentStatus,
+    paymentStatus: "unpaid" as const,
   };
 }
 
@@ -128,6 +104,10 @@ export function validatePurchaseForm(form: PurchaseFormValues, rows: PurchaseIte
 
     if (safeNumber(row.unit_cost) < 0) {
       return "Unit cost cannot be negative.";
+    }
+
+    if (safeNumber(row.line_discount) < 0) {
+      return "Line discount cannot be negative.";
     }
 
     if (getPurchaseLineTotal(row) < 0) {

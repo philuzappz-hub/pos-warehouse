@@ -18,6 +18,30 @@ function formatDisplayDate(value?: string | null) {
   }).format(date);
 }
 
+function stockStatusBadgeClass(status: string | null) {
+  const value = String(status || "").toLowerCase();
+
+  if (value === "received") {
+    return "bg-emerald-500/15 text-emerald-300 border-emerald-500/25";
+  }
+
+  if (value === "draft") {
+    return "bg-amber-500/15 text-amber-300 border-amber-500/25";
+  }
+
+  if (value === "cancelled") {
+    return "bg-red-500/15 text-red-300 border-red-500/25";
+  }
+
+  return "bg-slate-500/15 text-slate-300 border-slate-500/25";
+}
+
+function formatStockStatus(status: string | null) {
+  const value = String(status || "").toLowerCase();
+  if (!value) return "-";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 export default function SupplierStockStatementTable({
   rows,
   totalQuantity,
@@ -79,8 +103,14 @@ export default function SupplierStockStatementTable({
               GHS {money(row.line_total)}
             </td>
 
-            <td className="px-4 py-3 text-sm text-slate-200">
-              {row.stock_status || "-"}
+            <td className="px-4 py-3 text-sm">
+              <span
+                className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${stockStatusBadgeClass(
+                  row.stock_status
+                )}`}
+              >
+                {formatStockStatus(row.stock_status)}
+              </span>
             </td>
           </tr>
         ))}
@@ -88,7 +118,7 @@ export default function SupplierStockStatementTable({
         {rows.length === 0 && (
           <tr>
             <td colSpan={10} className="py-10 text-center text-slate-400">
-              No records found for selected filters
+              No stock receipt records found for selected filters
             </td>
           </tr>
         )}

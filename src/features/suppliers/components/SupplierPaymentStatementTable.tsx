@@ -119,15 +119,12 @@ export default function SupplierPaymentStatementTable({
               {row.purchase_reference || "General / Unallocated"}
             </td>
 
-            <td className="px-4 py-3 text-sm text-slate-300">
-              {row.notes || "-"}
-            </td>
+            <td className="px-4 py-3 text-sm text-slate-300">{row.notes || "-"}</td>
 
             <td className="px-4 py-3 text-right text-sm font-semibold text-emerald-300">
               GHS {money(row.amount)}
             </td>
 
-            {/* 🔥 TOOLTIP ADDED HERE */}
             <td
               className="px-4 py-3 text-right text-sm font-semibold text-cyan-300"
               title={`Allocated: GHS ${money(row.allocated_amount)} | Remaining: GHS ${money(
@@ -156,66 +153,39 @@ export default function SupplierPaymentStatementTable({
               </span>
             </td>
 
-            <td className="px-4 py-3 text-right text-sm">
-              <div className="flex flex-wrap justify-end gap-2">
-                {row.unallocated_amount > 0 && onAutoAllocate && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => onAutoAllocate(row)}
-                  >
+            <td className="px-4 py-3 text-right">
+              <div className="flex justify-end gap-2">
+                {row.unallocated_amount > 0 && onAutoAllocate ? (
+                  <Button size="sm" variant="outline" onClick={() => onAutoAllocate(row)}>
                     Auto Allocate
                   </Button>
-                )}
+                ) : null}
 
-                {row.unallocated_amount > 0 && onOpenAllocate && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onOpenAllocate(row)}
-                    className="border-slate-500 bg-slate-950 text-white hover:bg-slate-800"
-                  >
-                    Allocate
+                {row.allocated_amount > 0 && onViewHistory ? (
+                  <Button size="sm" variant="outline" onClick={() => onViewHistory(row)}>
+                    Allocation Log
                   </Button>
-                )}
-
-                {onViewHistory && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onViewHistory(row)}
-                    className="text-slate-200 hover:bg-slate-800 hover:text-white"
-                  >
-                    History
-                  </Button>
-                )}
+                ) : null}
               </div>
             </td>
           </tr>
         ))}
-
-        {rows.length === 0 && (
-          <tr>
-            <td colSpan={12} className="py-10 text-center text-slate-400">
-              No records found for selected filters
-            </td>
-          </tr>
-        )}
       </tbody>
 
-      {rows.length > 0 && (
-        <tfoot className="bg-slate-900/95">
-          <tr className="border-t border-slate-700">
-            <td colSpan={7} className="px-4 py-3 text-left text-sm font-semibold text-white">
-              Totals
-            </td>
-            <td className="px-4 py-3 text-right text-sm font-bold text-emerald-300">
-              GHS {money(totalAmount)}
-            </td>
-            <td colSpan={4}></td>
-          </tr>
-        </tfoot>
-      )}
+      <tfoot className="bg-slate-900/95">
+        <tr className="border-t border-slate-700">
+          <td colSpan={7} className="px-4 py-3 text-left text-sm font-semibold text-white">
+            Totals
+          </td>
+          <td className="px-4 py-3 text-right text-sm font-bold text-emerald-300">
+            GHS {money(totalAmount)}
+          </td>
+          <td className="px-4 py-3" />
+          <td className="px-4 py-3" />
+          <td className="px-4 py-3" />
+          <td className="px-4 py-3" />
+        </tr>
+      </tfoot>
     </table>
   );
 }

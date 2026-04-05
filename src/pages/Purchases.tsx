@@ -21,7 +21,7 @@ import { useEffect, useMemo, useState } from "react";
 
 export default function Purchases() {
   const { toast } = useToast();
-  const { profile, activeBranchId } = useAuth() as any;
+  const { profile } = useAuth() as any;
 
   const companyId = profile?.company_id ?? null;
 
@@ -97,18 +97,12 @@ export default function Purchases() {
       } catch (e: any) {
         toast({
           title: "Setup failed",
-          description: e?.message || "Could not load purchase setup data.",
+          description: e?.message || "Could not load setup data.",
           variant: "destructive",
         });
       }
     })();
   }, [companyId]);
-
-  useEffect(() => {
-    if (activeBranchId && branchFilter === "all") {
-      setBranchFilter("all");
-    }
-  }, [activeBranchId]);
 
   useEffect(() => {
     void loadPurchases();
@@ -129,14 +123,14 @@ export default function Purchases() {
     <div className="space-y-6 bg-slate-950 p-1">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Purchases</h1>
+          <h1 className="text-3xl font-bold text-white">Purchase Orders</h1>
           <p className="text-slate-300">
-            Track supplier purchases, paid amounts, supplier credit used, outstanding balances, and overpayments.
+            Manage supplier purchase orders, track payments, and monitor outstanding balances.
           </p>
         </div>
 
         <Button asChild className="w-full sm:w-auto font-semibold">
-          <a href="/purchases/new">New Purchase</a>
+          <a href="/purchases/new">Create Order</a>
         </Button>
       </div>
 
@@ -145,12 +139,18 @@ export default function Purchases() {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card className="border-cyan-700/40 bg-slate-900 shadow-sm">
           <CardContent className="pt-6">
-            <div className="text-sm font-medium text-slate-300">Supplier Credit Applied</div>
+            <div className="text-sm font-medium text-slate-300">
+              Supplier Credit Applied
+            </div>
             <div className="mt-2 text-3xl font-bold text-cyan-300">
-              GHS {totalCreditApplied.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              GHS{" "}
+              {totalCreditApplied.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
             </div>
             <p className="mt-2 text-xs text-slate-400">
-              Credit auto-used from supplier overpayments on purchases in this view.
+              Credit applied through supplier payments after orders were created.
             </p>
           </CardContent>
         </Card>
@@ -158,8 +158,9 @@ export default function Purchases() {
         <Card className="border-amber-700/30 bg-slate-900 shadow-sm xl:col-span-2">
           <CardContent className="pt-6">
             <p className="text-sm text-slate-300">
-              Purchases can now use existing supplier credit automatically before adding new payable balance.
-              Any extra cash above the remaining amount becomes a new overpayment credit.
+              Purchase orders do not apply payments or supplier credit at creation.
+              All payments and credit allocations are handled separately from the
+              Supplier Payments page.
             </p>
           </CardContent>
         </Card>

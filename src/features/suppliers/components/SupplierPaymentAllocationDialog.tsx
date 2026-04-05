@@ -2,26 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
 } from "@/components/ui/select";
 import { money } from "@/features/suppliers/helpers";
 import {
-    allocateSupplierPaymentToPurchase,
-    fetchOpenSupplierPurchases,
-    type SupplierOpenPurchaseOption,
+  allocateSupplierPaymentToPurchase,
+  fetchOpenSupplierPurchases,
+  type SupplierOpenPurchaseOption,
 } from "@/features/suppliers/services_payment_allocations";
 import { useToast } from "@/hooks/use-toast";
 
@@ -296,7 +296,7 @@ export default function SupplierPaymentAllocationDialog({
                   Balance Due
                 </p>
                 <p className="mt-1 text-sm font-semibold text-cyan-300">
-                  GHS {money(selectedPurchase.balance_due)}
+                 GHS {money(selectedPurchase.balance_due)}
                 </p>
               </div>
             </div>

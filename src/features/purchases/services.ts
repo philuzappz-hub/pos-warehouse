@@ -115,13 +115,12 @@ export async function fetchSupplierAccountSnapshot(args: {
   );
 
   const creditPool = roundMoney(
-    Math.max(0, totalOverpaymentCredits + totalUnallocatedPayments - totalCreditsApplied)
+    Math.max(0, totalOverpaymentCredits + totalUnallocatedPayments)
   );
 
-  const netAfterCredit = roundMoney(outstandingPurchases - creditPool);
+  const netPayable = roundMoney(Math.max(0, outstandingPurchases));
+  const availableCredit = roundMoney(creditPool);
 
-  const netPayable = roundMoney(Math.max(0, netAfterCredit));
-  const availableCredit = roundMoney(Math.max(0, -netAfterCredit));
   const closingBalance =
     netPayable > 0 ? netPayable : availableCredit > 0 ? -availableCredit : 0;
 
@@ -157,11 +156,10 @@ export async function createPurchaseWithItems(args: {
   userId: string | null;
   form: PurchaseFormValues;
   rows: PurchaseItemFormRow[];
-  supplierCreditBalance?: number;
 }) {
-  const { companyId, userId, form, rows, supplierCreditBalance = 0 } = args;
+  const { companyId, userId, form, rows } = args;
 
-  const totals = getPurchaseTotals(form, rows, supplierCreditBalance);
+  const totals = getPurchaseTotals(form, rows);
 
   const purchasePayload = {
     company_id: companyId,
@@ -175,15 +173,15 @@ export async function createPurchaseWithItems(args: {
     tax_amount: totals.taxAmount,
     other_charges: totals.otherCharges,
     total_amount: totals.totalAmount,
-    amount_paid: totals.effectivePaidAmount,
-    balance_due: totals.balanceDue,
-    overpayment_amount: totals.overpaymentAmount,
-    supplier_credit_applied: totals.supplierCreditApplied,
-    payment_status: totals.paymentStatus,
-    stock_status: "received",
+    amount_paid: 0,
+    balance_due: totals.totalAmount,
+    overpayment_amount: 0,
+    supplier_credit_applied: 0,
+    payment_status: "unpaid",
+    stock_status: "draft",
     notes: normalizeOptionalText(form.notes),
     created_by: userId,
-    approved_by: userId,
+    approved_by: null,
   };
 
   const { data: purchase, error: purchaseError } = await (supabase as any)
@@ -211,35 +209,6 @@ export async function createPurchaseWithItems(args: {
 
   if (itemError) throw itemError;
 
-  for (const row of rows) {
-    const qty = roundMoney(safeNumber(row.quantity));
-    const unitCost = roundMoney(safeNumber(row.unit_cost));
-
-    const { data: product, error: productReadError } = await (supabase as any)
-      .from("products")
-      .select("id,quantity_in_stock")
-      .eq("id", row.product_id)
-      .single();
-
-    if (productReadError) throw productReadError;
-
-    const currentQty = roundMoney(safeNumber(product?.quantity_in_stock));
-    const newQty = roundMoney(currentQty + qty);
-
-    const { error: productUpdateError } = await (supabase as any)
-      .from("products")
-      .update({
-        quantity_in_stock: newQty,
-        cost_price: unitCost,
-        last_cost: unitCost,
-        average_cost: unitCost,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", row.product_id);
-
-    if (productUpdateError) throw productUpdateError;
-  }
-
   return purchase;
 }
 
@@ -254,7 +223,7 @@ export async function fetchPurchases(args: {
   const { companyId, branchId, supplierId, paymentStatus, startDate, endDate } = args;
 
   let query = (supabase as any)
-    .from("purchases")
+    .from("supplier_purchase_balance_view")
     .select(`
       *,
       supplier:suppliers(id,name,supplier_code)
@@ -272,7 +241,14 @@ export async function fetchPurchases(args: {
   const { data, error } = await query;
   if (error) throw error;
 
-  return (data ?? []) as PurchaseRow[];
+  const mapped = (data ?? []).map((row: any) => ({
+    ...row,
+    amount_paid: safeNumber(row.allocated_amount),
+    balance_due: safeNumber(row.balance_due),
+    overpayment_amount: 0,
+  }));
+
+  return mapped as PurchaseRow[];
 }
 
 export async function fetchPurchaseDetails(args: {
@@ -282,7 +258,7 @@ export async function fetchPurchaseDetails(args: {
   const { companyId, purchaseId } = args;
 
   const { data: purchase, error: purchaseError } = await (supabase as any)
-    .from("purchases")
+    .from("supplier_purchase_balance_view")
     .select(`
       *,
       supplier:suppliers(id,name,supplier_code,phone,email,contact_person)
@@ -292,6 +268,13 @@ export async function fetchPurchaseDetails(args: {
     .single();
 
   if (purchaseError) throw purchaseError;
+
+  const mappedPurchase = {
+    ...purchase,
+    amount_paid: safeNumber((purchase as any)?.allocated_amount),
+    balance_due: safeNumber((purchase as any)?.balance_due),
+    overpayment_amount: 0,
+  } as PurchaseRow;
 
   const { data: items, error: itemsError } = await (supabase as any)
     .from("purchase_items")
@@ -315,7 +298,7 @@ export async function fetchPurchaseDetails(args: {
   if (paymentsError) throw paymentsError;
 
   return {
-    purchase: purchase as PurchaseRow,
+    purchase: mappedPurchase,
     items: (items ?? []) as any,
     payments: (payments ?? []) as any,
   };
