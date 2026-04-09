@@ -21,6 +21,8 @@ import {
   fetchSupplierStatement,
   fetchSuppliers,
   type SupplierAccountSnapshot,
+  type SupplierCreditNoteAllocationRow,
+  type SupplierCreditNoteRow,
 } from "@/features/suppliers/services";
 import {
   fetchSupplierPaymentStatement,
@@ -68,24 +70,56 @@ function buildWhatsAppPhone(phone?: string | null) {
   return raw;
 }
 
-function getSummary(snapshot?: SupplierAccountSnapshot | null) {
+function getSummary(snapshot?: SupplierAccountSnapshot | null, entries: SupplierStatementEntry[] = []) {
   const purchases = roundMoney(safeNumber(snapshot?.totalPurchases));
   const cashPaidToPurchases = roundMoney(safeNumber(snapshot?.totalPayments));
   const creditApplied = roundMoney(safeNumber(snapshot?.totalCreditsApplied));
-  const settledAgainstPurchases = roundMoney(cashPaidToPurchases + creditApplied);
+
+  const creditNotesIssued = roundMoney(
+    entries
+      .filter((entry) => entry.entry_type === "credit_note_issued")
+      .reduce((sum, entry) => sum + safeNumber(entry.credit), 0)
+  );
+
+  const creditNotesApplied = roundMoney(
+    entries
+      .filter((entry) => entry.entry_type === "credit_note_applied")
+      .reduce((sum, entry) => sum + safeNumber(entry.credit), 0)
+  );
+
+  const settledAgainstPurchases = roundMoney(
+    cashPaidToPurchases + creditApplied + creditNotesApplied
+  );
+
   const grossOutstanding = roundMoney(Math.max(purchases - settledAgainstPurchases, 0));
-  const availableCredit = roundMoney(safeNumber(snapshot?.availableCredit));
+  const availableCredit = roundMoney(safeNumber(snapshot?.availableCredit) + creditNotesIssued);
+
   const netPayable = roundMoney(Math.max(grossOutstanding - availableCredit, 0));
 
   return {
     purchases,
     cashPaidToPurchases,
     creditApplied,
+    creditNotesIssued,
+    creditNotesApplied,
     settledAgainstPurchases,
     grossOutstanding,
     availableCredit,
     netPayable,
   };
+}
+
+function getCreditNoteUsage(note: SupplierCreditNoteRow, allocations: SupplierCreditNoteAllocationRow[]) {
+  const used = roundMoney(
+    allocations
+      .filter((allocation) => allocation.supplier_credit_note_id === note.id)
+      .reduce((sum, allocation) => sum + safeNumber(allocation.allocated_amount), 0)
+  );
+
+  const total = roundMoney(safeNumber(note.amount));
+  const available = roundMoney(Math.max(total - used, 0));
+
+  return { used, available };
 }
 
 export default function SupplierStatement() {
@@ -102,6 +136,8 @@ export default function SupplierStatement() {
   const [entries, setEntries] = useState<SupplierStatementEntry[]>([]);
   const [snapshot, setSnapshot] = useState<SupplierAccountSnapshot | null>(null);
   const [paymentRows, setPaymentRows] = useState<SupplierPaymentStatementRow[]>([]);
+  const [creditNotes, setCreditNotes] = useState<SupplierCreditNoteRow[]>([]);
+  const [creditNoteAllocations, setCreditNoteAllocations] = useState<SupplierCreditNoteAllocationRow[]>([]);
   const [loading, setLoading] = useState(false);
 
   const [companyMeta, setCompanyMeta] = useState<CompanyExportDetails>({
@@ -112,7 +148,7 @@ export default function SupplierStatement() {
     logo_url: profile?.company_logo_url || profile?.company?.logo_url || "",
   });
 
-  const summary = useMemo(() => getSummary(snapshot), [snapshot]);
+  const summary = useMemo(() => getSummary(snapshot, entries), [snapshot, entries]);
 
   async function loadSetup() {
     if (!companyId) return;
@@ -147,6 +183,8 @@ export default function SupplierStatement() {
       setEntries([]);
       setSnapshot(null);
       setPaymentRows([]);
+      setCreditNotes([]);
+      setCreditNoteAllocations([]);
       return;
     }
 
@@ -170,6 +208,8 @@ export default function SupplierStatement() {
       setEntries(result.entries);
       setSnapshot(result.snapshot);
       setPaymentRows(paymentStatement.rows);
+      setCreditNotes(result.creditNotes || []);
+      setCreditNoteAllocations(result.creditNoteAllocations || []);
     } catch (e: any) {
       toast({
         title: "Load failed",
@@ -188,6 +228,8 @@ export default function SupplierStatement() {
       buildSummaryCardHtml("Total Purchases", `GHS ${money(summary.purchases)}`),
       buildSummaryCardHtml("Cash Applied", `GHS ${money(summary.cashPaidToPurchases)}`),
       buildSummaryCardHtml("Credit Applied", `GHS ${money(summary.creditApplied)}`),
+      buildSummaryCardHtml("Credit Notes Issued", `GHS ${money(summary.creditNotesIssued)}`),
+      buildSummaryCardHtml("Credit Notes Applied", `GHS ${money(summary.creditNotesApplied)}`),
       buildSummaryCardHtml("Total Settled", `GHS ${money(summary.settledAgainstPurchases)}`),
       buildSummaryCardHtml("Gross Outstanding", `GHS ${money(summary.grossOutstanding)}`),
       buildSummaryCardHtml("Available Credit", `GHS ${money(summary.availableCredit)}`),
@@ -205,13 +247,13 @@ export default function SupplierStatement() {
         { label: "Running Balance", right: true },
       ],
       rows: entries.map((entry) => [
-        (entry as any).entry_date,
-        (entry as any).entry_type,
-        (entry as any).reference,
-        (entry as any).description,
-        (entry as any).debit ? `GHS ${money((entry as any).debit)}` : "—",
-        (entry as any).credit ? `GHS ${money((entry as any).credit)}` : "—",
-        `GHS ${money((entry as any).running_balance)}`,
+        entry.entry_date,
+        entry.entry_type,
+        entry.reference,
+        entry.description,
+        entry.debit ? `GHS ${money(entry.debit)}` : "—",
+        entry.credit ? `GHS ${money(entry.credit)}` : "—",
+        `GHS ${money(entry.running_balance)}`,
       ]),
     });
 
@@ -251,6 +293,8 @@ export default function SupplierStatement() {
       `Total Purchases: GHS ${money(summary.purchases)}`,
       `Cash Applied: GHS ${money(summary.cashPaidToPurchases)}`,
       `Credit Applied: GHS ${money(summary.creditApplied)}`,
+      `Credit Notes Issued: GHS ${money(summary.creditNotesIssued)}`,
+      `Credit Notes Applied: GHS ${money(summary.creditNotesApplied)}`,
       `Total Settled: GHS ${money(summary.settledAgainstPurchases)}`,
       `Gross Outstanding: GHS ${money(summary.grossOutstanding)}`,
       `Available Credit: GHS ${money(summary.availableCredit)}`,
@@ -289,8 +333,12 @@ export default function SupplierStatement() {
         </div>
 
         <div className="flex gap-2">
-          <Button variant="outline" onClick={handleShare} disabled={!supplier}>Share</Button>
-          <Button onClick={handleExport} disabled={!supplier}>Export</Button>
+          <Button variant="outline" onClick={handleShare} disabled={!supplier}>
+            Share
+          </Button>
+          <Button onClick={handleExport} disabled={!supplier}>
+            Export
+          </Button>
         </div>
       </div>
 
@@ -300,11 +348,15 @@ export default function SupplierStatement() {
             <div className="space-y-2">
               <Label className="text-slate-200">Supplier</Label>
               <Select value={supplierId} onValueChange={setSupplierId}>
-                <SelectTrigger className="border-slate-500 bg-slate-950 text-white"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="border-slate-500 bg-slate-950 text-white">
+                  <SelectValue />
+                </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Select supplier</SelectItem>
                   {suppliers.map((row) => (
-                    <SelectItem key={row.id} value={row.id}>{row.name}</SelectItem>
+                    <SelectItem key={row.id} value={row.id}>
+                      {row.name}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -312,12 +364,22 @@ export default function SupplierStatement() {
 
             <div className="space-y-2">
               <Label className="text-slate-200">Start Date</Label>
-              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="border-slate-500 bg-slate-950 text-white" />
+              <Input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="border-slate-500 bg-slate-950 text-white"
+              />
             </div>
 
             <div className="space-y-2">
               <Label className="text-slate-200">End Date</Label>
-              <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="border-slate-500 bg-slate-950 text-white" />
+              <Input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="border-slate-500 bg-slate-950 text-white"
+              />
             </div>
 
             <div className="rounded-lg border border-slate-700 bg-slate-950 p-4 text-white">
@@ -329,25 +391,149 @@ export default function SupplierStatement() {
 
       {supplier ? (
         <>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-7">
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-white">Total Purchases<br />GHS {money(summary.purchases)}</CardContent></Card>
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-emerald-300">Cash Applied<br />GHS {money(summary.cashPaidToPurchases)}</CardContent></Card>
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-cyan-300">Credit Applied<br />GHS {money(summary.creditApplied)}</CardContent></Card>
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-white">Total Settled<br />GHS {money(summary.settledAgainstPurchases)}</CardContent></Card>
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-amber-300">Gross Outstanding<br />GHS {money(summary.grossOutstanding)}</CardContent></Card>
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-cyan-300">Available Credit<br />GHS {money(summary.availableCredit)}</CardContent></Card>
-            <Card className="border-slate-600 bg-slate-900"><CardContent className="pt-6 text-amber-300">Net Payable<br />GHS {money(summary.netPayable)}</CardContent></Card>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-9">
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-white">
+                Total Purchases
+                <br />
+                GHS {money(summary.purchases)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-emerald-300">
+                Cash Applied
+                <br />
+                GHS {money(summary.cashPaidToPurchases)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-cyan-300">
+                Credit Applied
+                <br />
+                GHS {money(summary.creditApplied)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-fuchsia-300">
+                Credit Notes Issued
+                <br />
+                GHS {money(summary.creditNotesIssued)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-indigo-300">
+                Credit Notes Applied
+                <br />
+                GHS {money(summary.creditNotesApplied)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-white">
+                Total Settled
+                <br />
+                GHS {money(summary.settledAgainstPurchases)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-amber-300">
+                Gross Outstanding
+                <br />
+                GHS {money(summary.grossOutstanding)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-cyan-300">
+                Available Credit
+                <br />
+                GHS {money(summary.availableCredit)}
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-600 bg-slate-900">
+              <CardContent className="pt-6 text-amber-300">
+                Net Payable
+                <br />
+                GHS {money(summary.netPayable)}
+              </CardContent>
+            </Card>
           </div>
 
           <Card className="border-slate-600 bg-slate-900">
-            <CardHeader><CardTitle className="text-white">Statement Ledger</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle className="text-white">Statement Ledger</CardTitle>
+            </CardHeader>
             <CardContent className="overflow-x-auto">
               <SupplierStatementTable entries={entries} />
             </CardContent>
           </Card>
 
           <Card className="border-slate-600 bg-slate-900">
-            <CardHeader><CardTitle className="text-white">Recorded Supplier Payments</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle className="text-white">Credit Notes Register</CardTitle>
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-900/90 text-slate-300">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-medium">Date</th>
+                    <th className="px-4 py-3 text-left font-medium">Reference</th>
+                    <th className="px-4 py-3 text-left font-medium">Reason</th>
+                    <th className="px-4 py-3 text-right font-medium">Amount</th>
+                    <th className="px-4 py-3 text-right font-medium">Used</th>
+                    <th className="px-4 py-3 text-right font-medium">Remaining</th>
+                    <th className="px-4 py-3 text-left font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {creditNotes.length === 0 ? (
+                    <tr>
+                      <td className="px-4 py-6 text-slate-400" colSpan={7}>
+                        No credit notes found.
+                      </td>
+                    </tr>
+                  ) : (
+                    creditNotes.map((note) => {
+                      const usage = getCreditNoteUsage(note, creditNoteAllocations);
+
+                      return (
+                        <tr key={note.id} className="border-b border-slate-800 last:border-b-0">
+                          <td className="px-4 py-3 text-slate-200">
+                            {formatDisplayDate(note.credit_date)}
+                          </td>
+                          <td className="px-4 py-3 text-slate-200">
+                            {note.reference_number || "-"}
+                          </td>
+                          <td className="px-4 py-3 text-slate-200">{note.reason || "-"}</td>
+                          <td className="px-4 py-3 text-right text-fuchsia-300">
+                            GHS {money(safeNumber(note.amount))}
+                          </td>
+                          <td className="px-4 py-3 text-right text-indigo-300">
+                            GHS {money(usage.used)}
+                          </td>
+                          <td className="px-4 py-3 text-right text-emerald-300">
+                            GHS {money(usage.available)}
+                          </td>
+                          <td className="px-4 py-3 text-slate-200">{note.status || "open"}</td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-600 bg-slate-900">
+            <CardHeader>
+              <CardTitle className="text-white">Recorded Supplier Payments</CardTitle>
+            </CardHeader>
             <CardContent className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-900/90 text-slate-300">
@@ -363,17 +549,33 @@ export default function SupplierStatement() {
                 </thead>
                 <tbody>
                   {paymentRows.length === 0 ? (
-                    <tr><td className="px-4 py-6 text-slate-400" colSpan={7}>No payment rows found.</td></tr>
+                    <tr>
+                      <td className="px-4 py-6 text-slate-400" colSpan={7}>
+                        No payment rows found.
+                      </td>
+                    </tr>
                   ) : (
                     paymentRows.map((row) => (
                       <tr key={row.id} className="border-b border-slate-800 last:border-b-0">
-                        <td className="px-4 py-3 text-slate-200">{formatDisplayDate(row.payment_date)}</td>
+                        <td className="px-4 py-3 text-slate-200">
+                          {formatDisplayDate(row.payment_date)}
+                        </td>
                         <td className="px-4 py-3 text-slate-200">{row.payment_method || "-"}</td>
-                        <td className="px-4 py-3 text-slate-200">{row.reference_number || "-"}</td>
-                        <td className="px-4 py-3 text-right text-white">GHS {money(row.amount)}</td>
-                        <td className="px-4 py-3 text-right text-emerald-300">GHS {money(row.allocated_amount)}</td>
-                        <td className="px-4 py-3 text-right text-amber-300">GHS {money(row.unallocated_amount)}</td>
-                        <td className="px-4 py-3 text-slate-200">{row.allocation_status || "unallocated"}</td>
+                        <td className="px-4 py-3 text-slate-200">
+                          {row.reference_number || "-"}
+                        </td>
+                        <td className="px-4 py-3 text-right text-white">
+                          GHS {money(row.amount)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-emerald-300">
+                          GHS {money(row.allocated_amount)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-amber-300">
+                          GHS {money(row.unallocated_amount)}
+                        </td>
+                        <td className="px-4 py-3 text-slate-200">
+                          {row.allocation_status || "unallocated"}
+                        </td>
                       </tr>
                     ))
                   )}

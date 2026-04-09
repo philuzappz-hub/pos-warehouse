@@ -1,13 +1,35 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { money } from "@/features/purchases/helpers";
 import { fetchPurchaseDetails } from "@/features/purchases/services";
 import type { PurchaseDetailsResult } from "@/features/purchases/types";
 import type { BranchRow } from "@/features/reports/types";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+
+function formatDisplayDate(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(date);
+}
+
+function safeNumber(value: unknown) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
 
 export default function PurchaseDetails() {
   const { toast } = useToast();
@@ -20,6 +42,7 @@ export default function PurchaseDetails() {
   const [details, setDetails] = useState<PurchaseDetailsResult | null>(null);
   const [branches, setBranches] = useState<BranchRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [allocationModalOpen, setAllocationModalOpen] = useState(false);
 
   const loadBranches = async () => {
     if (!companyId) return;
@@ -81,13 +104,43 @@ export default function PurchaseDetails() {
     purchase.payment_status !== "paid" &&
     Number(purchase.balance_due || 0) > 0;
 
+  const allocationSummary = useMemo(() => {
+    const totalAllocated = payments.reduce(
+      (sum, payment) => sum + safeNumber(payment.amount),
+      0
+    );
+
+    return {
+      totalEntries: payments.length,
+      totalAllocated,
+      currentBalance: safeNumber(purchase?.balance_due || 0),
+    };
+  }, [payments, purchase?.balance_due]);
+
+  const allocationRowsWithRunning = useMemo(() => {
+    const totalAmount = safeNumber(purchase?.total_amount || 0);
+    let runningSettled = 0;
+
+    return payments.map((payment) => {
+      const amount = safeNumber(payment.amount);
+      runningSettled += amount;
+
+      return {
+        ...payment,
+        runningSettled,
+        remainingAfter: Math.max(0, totalAmount - runningSettled),
+      };
+    });
+  }, [payments, purchase?.total_amount]);
+
   return (
     <div className="space-y-6 bg-slate-950 p-1">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-white">Purchase Details</h1>
           <p className="text-slate-300">
-            Review order header, supplier, items, payment status, balances, and linked payments.
+            Review order header, supplier, items, payment status, balances, and
+            allocation-based settlements.
             {loading ? " Loading..." : ""}
           </p>
         </div>
@@ -316,12 +369,21 @@ export default function PurchaseDetails() {
           </Card>
 
           <Card className="border-slate-600 bg-slate-900 shadow-sm">
-            <CardHeader>
-              <CardTitle className="text-white">Linked Payments</CardTitle>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-white">Payment Allocations</CardTitle>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAllocationModalOpen(true)}
+                disabled={payments.length === 0}
+              >
+                View Breakdown
+              </Button>
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto rounded-lg border border-slate-600 bg-slate-900">
-                <table className="w-full min-w-[800px]">
+                <table className="w-full min-w-[900px]">
                   <thead className="bg-slate-800">
                     <tr className="border-b border-slate-700">
                       <th className="px-3 py-3 text-left text-sm font-semibold text-slate-200">
@@ -337,7 +399,7 @@ export default function PurchaseDetails() {
                         Notes
                       </th>
                       <th className="px-3 py-3 text-right text-sm font-semibold text-slate-200">
-                        Amount
+                        Allocated Amount
                       </th>
                     </tr>
                   </thead>
@@ -345,14 +407,20 @@ export default function PurchaseDetails() {
                   <tbody>
                     {payments.map((payment) => (
                       <tr key={payment.id} className="border-b border-slate-700 last:border-b-0">
-                        <td className="px-3 py-3 text-slate-200">{payment.payment_date}</td>
+                        <td className="px-3 py-3 text-slate-200">
+                          {formatDisplayDate(payment.payment_date)}
+                        </td>
+
                         <td className="px-3 py-3 text-slate-200 capitalize">
                           {payment.payment_method}
                         </td>
+
                         <td className="px-3 py-3 text-slate-200">
                           {payment.reference_number || "-"}
                         </td>
+
                         <td className="px-3 py-3 text-slate-200">{payment.notes || "-"}</td>
+
                         <td className="px-3 py-3 text-right font-semibold text-emerald-300">
                           GHS {money(payment.amount)}
                         </td>
@@ -362,7 +430,7 @@ export default function PurchaseDetails() {
                     {payments.length === 0 && (
                       <tr>
                         <td colSpan={5} className="py-8 text-center text-slate-300">
-                          No linked payments found for this purchase.
+                          No allocations found for this purchase.
                         </td>
                       </tr>
                     )}
@@ -371,6 +439,121 @@ export default function PurchaseDetails() {
               </div>
             </CardContent>
           </Card>
+
+          <Dialog open={allocationModalOpen} onOpenChange={setAllocationModalOpen}>
+            <DialogContent className="max-h-[90vh] overflow-y-auto border-slate-700 bg-slate-950 text-white sm:max-w-5xl">
+              <DialogHeader>
+                <DialogTitle>Payment Allocation Breakdown</DialogTitle>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                <div className="grid gap-3 rounded-lg border border-slate-700 bg-slate-900 p-4 md:grid-cols-3">
+                  <div>
+                    <p className="text-xs text-slate-400">Allocation Entries</p>
+                    <p className="font-semibold text-white">{allocationSummary.totalEntries}</p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-slate-400">Total Allocated</p>
+                    <p className="font-semibold text-emerald-300">
+                      GHS {money(allocationSummary.totalAllocated)}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-slate-400">Current Balance</p>
+                    <p className="font-semibold text-amber-300">
+                      GHS {money(allocationSummary.currentBalance)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-900">
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[1100px]">
+                      <thead className="bg-slate-900">
+                        <tr className="border-b border-slate-700">
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-white">
+                            Allocation Date
+                          </th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-white">
+                            Payment ID
+                          </th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-white">
+                            Method
+                          </th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-white">
+                            Reference
+                          </th>
+                          <th className="px-4 py-3 text-left text-sm font-semibold text-white">
+                            Notes
+                          </th>
+                          <th className="px-4 py-3 text-right text-sm font-semibold text-white">
+                            Allocated Amount
+                          </th>
+                          <th className="px-4 py-3 text-right text-sm font-semibold text-white">
+                            Running Settled
+                          </th>
+                          <th className="px-4 py-3 text-right text-sm font-semibold text-white">
+                            Remaining After
+                          </th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {allocationRowsWithRunning.map((payment) => (
+                          <tr
+                            key={`modal-${payment.id}`}
+                            className="border-b border-slate-800 last:border-b-0 hover:bg-slate-900/50"
+                          >
+                            <td className="px-4 py-3 text-sm text-slate-200">
+                              {formatDisplayDate(payment.payment_date)}
+                            </td>
+
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              {payment.id}
+                            </td>
+
+                            <td className="px-4 py-3 text-sm text-slate-200 capitalize">
+                              {payment.payment_method}
+                            </td>
+
+                            <td className="px-4 py-3 text-sm text-slate-200">
+                              {payment.reference_number || "-"}
+                            </td>
+
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              {payment.notes || "-"}
+                            </td>
+
+                            <td className="px-4 py-3 text-right text-sm font-semibold text-emerald-300">
+                              GHS {money(payment.amount)}
+                            </td>
+
+                            <td className="px-4 py-3 text-right text-sm font-semibold text-cyan-300">
+                              GHS {money(payment.runningSettled)}
+                            </td>
+
+                            <td className="px-4 py-3 text-right text-sm font-semibold text-amber-300">
+                              GHS {money(payment.remainingAfter)}
+                            </td>
+                          </tr>
+                        ))}
+
+                        {allocationRowsWithRunning.length === 0 && (
+                          <tr>
+                            <td colSpan={8} className="py-10 text-center text-slate-400">
+                              No allocation breakdown found for this purchase.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
         </>
       )}
     </div>

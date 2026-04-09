@@ -49,6 +49,33 @@ type SupplierPaymentBalanceRow = {
   allocation_status?: string | null;
 };
 
+export type SupplierCreditNoteRow = {
+  id: string;
+  credit_date: string | null;
+  created_at?: string | null;
+  amount: number | string | null;
+  reference_number: string | null;
+  reason: string | null;
+  notes: string | null;
+  status?: string | null;
+};
+
+export type SupplierCreditNoteAllocationRow = {
+  id: string;
+  purchase_id: string;
+  allocation_date: string | null;
+  created_at?: string | null;
+  allocated_amount: number | string | null;
+  notes: string | null;
+  supplier_credit_note_id: string;
+  credit_note?: {
+    id: string;
+    credit_date?: string | null;
+    reference_number?: string | null;
+    reason?: string | null;
+  } | null;
+};
+
 type SnapshotRpcRow = {
   supplier_id: string;
   total_purchases: number | string | null;
@@ -84,6 +111,14 @@ export type SupplierCreditApplyResult = {
   remainingBalance: number;
 };
 
+export type FetchSupplierStatementResult = {
+  supplier: SupplierRow;
+  entries: SupplierStatementEntry[];
+  snapshot: SupplierAccountSnapshot;
+  creditNotes: SupplierCreditNoteRow[];
+  creditNoteAllocations: SupplierCreditNoteAllocationRow[];
+};
+
 type SupplierPaymentCreateArgs = {
   companyId: string;
   userId: string | null;
@@ -115,6 +150,10 @@ function statementTypeOrder(entryType: SupplierStatementEntry["entry_type"]) {
       return 3;
     case "overpayment_credit":
       return 4;
+    case "credit_note_issued":
+      return 5;
+    case "credit_note_applied":
+      return 6;
     default:
       return 99;
   }
@@ -383,7 +422,7 @@ export async function fetchSupplierStatement(args: {
   supplierId: string;
   startDate?: string | null;
   endDate?: string | null;
-}) {
+}): Promise<FetchSupplierStatementResult> {
   const { companyId, supplierId, startDate, endDate } = args;
 
   const { data: supplier, error: supplierError } = await (supabase as any)
@@ -445,6 +484,104 @@ export async function fetchSupplierStatement(args: {
   const { data: paymentBalances, error: paymentBalancesError } = await paymentBalanceQuery;
   if (paymentBalancesError) throw paymentBalancesError;
 
+  let creditNotesQuery = (supabase as any)
+    .from("supplier_credit_notes")
+    .select(`
+      id,
+      credit_date,
+      created_at,
+      amount,
+      reference_number,
+      reason,
+      notes,
+      status
+    `)
+    .eq("company_id", companyId)
+    .eq("supplier_id", supplierId)
+    .neq("status", "cancelled")
+    .order("credit_date", { ascending: true })
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (startDate) creditNotesQuery = creditNotesQuery.gte("credit_date", startDate);
+  if (endDate) creditNotesQuery = creditNotesQuery.lte("credit_date", endDate);
+
+  const { data: creditNotes, error: creditNotesError } = await creditNotesQuery;
+  if (creditNotesError) throw creditNotesError;
+
+  let creditNoteAllocationsQuery = (supabase as any)
+    .from("supplier_credit_note_allocations")
+    .select(`
+      id,
+      purchase_id,
+      allocation_date,
+      created_at,
+      allocated_amount,
+      notes,
+      supplier_credit_note_id
+    `)
+    .eq("company_id", companyId)
+    .eq("supplier_id", supplierId)
+    .order("allocation_date", { ascending: true })
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (startDate) creditNoteAllocationsQuery = creditNoteAllocationsQuery.gte("allocation_date", startDate);
+  if (endDate) creditNoteAllocationsQuery = creditNoteAllocationsQuery.lte("allocation_date", endDate);
+
+  const { data: creditNoteAllocationsRaw, error: creditNoteAllocationsError } =
+    await creditNoteAllocationsQuery;
+  if (creditNoteAllocationsError) throw creditNoteAllocationsError;
+
+  const creditNoteAllocations =
+    (creditNoteAllocationsRaw ?? []) as SupplierCreditNoteAllocationRow[];
+
+  const creditNoteIds = Array.from(
+    new Set(
+      creditNoteAllocations
+        .map((row) => String(row.supplier_credit_note_id || ""))
+        .filter(Boolean)
+    )
+  );
+
+  let creditNoteMap = new Map<
+    string,
+    {
+      id: string;
+      credit_date?: string | null;
+      reference_number?: string | null;
+      reason?: string | null;
+    }
+  >();
+
+  if (creditNoteIds.length > 0) {
+    const { data: relatedCreditNotes, error: relatedCreditNotesError } = await (supabase as any)
+      .from("supplier_credit_notes")
+      .select("id,credit_date,reference_number,reason")
+      .in("id", creditNoteIds);
+
+    if (relatedCreditNotesError) throw relatedCreditNotesError;
+
+    creditNoteMap = new Map(
+      (relatedCreditNotes ?? []).map((row: any) => [
+        String(row.id),
+        {
+          id: String(row.id),
+          credit_date: row.credit_date || null,
+          reference_number: row.reference_number || null,
+          reason: row.reason || null,
+        },
+      ])
+    );
+  }
+
+  const allocationsWithCredit: SupplierCreditNoteAllocationRow[] = creditNoteAllocations.map(
+    (row) => ({
+      ...row,
+      credit_note: creditNoteMap.get(String(row.supplier_credit_note_id)) || null,
+    })
+  );
+
   const seeds: EntrySeed[] = [];
   const openingBalance = toMoney((supplier as any)?.opening_balance);
 
@@ -494,17 +631,6 @@ export async function fetchSupplierStatement(args: {
       });
     }
 
-    /**
-     * IMPORTANT:
-     * Keep Credit Applied visible in the ledger for audit/history,
-     * but DO NOT let it reduce running balance again.
-     *
-     * Why:
-     * Once payment allocations and purchase balances are already reflected,
-     * subtracting supplier_credit_applied again causes the ledger to show
-     * fake negative balances like "supplier owes you", even though the credit
-     * has already been consumed.
-     */
     if (creditApplied > 0) {
       seeds.push({
         id: `credit-applied-${row.id}`,
@@ -541,6 +667,56 @@ export async function fetchSupplierStatement(args: {
     });
   }
 
+  for (const creditNote of (creditNotes ?? []) as SupplierCreditNoteRow[]) {
+    const amount = toMoney(creditNote.amount);
+    if (amount <= 0) continue;
+
+    const creditDate = String(creditNote.credit_date || "");
+    const creditId = String(creditNote.id || "");
+    const createdAt = String(creditNote.created_at || "");
+    const reference = creditNote.reference_number || `Credit Note ${creditId}`;
+    const reasonText = creditNote.reason ? ` • ${creditNote.reason}` : "";
+
+    seeds.push({
+      id: `credit-note-issued-${creditId}`,
+      entry_type: "credit_note_issued",
+      entry_date: creditDate,
+      reference,
+      description: `Supplier credit note issued${reasonText}`,
+      debit: 0,
+      credit: amount,
+      sortKey: `credit-note-issued-${creditDate}-${createdAt}-${creditId}`,
+      affects_running_balance: true,
+    });
+  }
+
+  for (const allocation of allocationsWithCredit) {
+    const amount = toMoney(allocation.allocated_amount);
+    if (amount <= 0) continue;
+
+    const allocationDate = String(allocation.allocation_date || "");
+    const allocationId = String(allocation.id || "");
+    const createdAt = String(allocation.created_at || "");
+    const creditRef =
+      allocation.credit_note?.reference_number ||
+      `Credit Note ${allocation.supplier_credit_note_id}`;
+    const reasonText = allocation.credit_note?.reason
+      ? ` • ${allocation.credit_note.reason}`
+      : "";
+
+    seeds.push({
+      id: `credit-note-applied-${allocationId}`,
+      entry_type: "credit_note_applied",
+      entry_date: allocationDate,
+      reference: creditRef,
+      description: `Credit note applied to purchase${reasonText}`,
+      debit: 0,
+      credit: amount,
+      sortKey: `credit-note-applied-${allocationDate}-${createdAt}-${allocationId}`,
+      affects_running_balance: false,
+    });
+  }
+
   seeds.sort((a, b) => {
     if (a.entry_date !== b.entry_date) return a.entry_date.localeCompare(b.entry_date);
 
@@ -574,6 +750,8 @@ export async function fetchSupplierStatement(args: {
     supplier: supplier as SupplierRow,
     entries,
     snapshot,
+    creditNotes: (creditNotes ?? []) as SupplierCreditNoteRow[],
+    creditNoteAllocations: allocationsWithCredit,
   };
 }
 

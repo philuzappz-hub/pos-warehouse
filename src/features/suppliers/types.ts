@@ -48,7 +48,9 @@ export type SupplierStatementEntry = {
     | "purchase"
     | "payment"
     | "overpayment_credit"
-    | "credit_applied";
+    | "credit_applied"
+    | "credit_note_issued"
+    | "credit_note_applied";
   entry_date: string;
   reference: string;
   description: string;
@@ -63,6 +65,8 @@ export type SupplierStatementSummary = {
   totalPayments: number;
   totalOverpaymentCredits: number;
   totalCreditsApplied: number;
+  totalCreditNotesIssued: number;
+  totalCreditNotesApplied: number;
   closingBalance: number;
 };
 

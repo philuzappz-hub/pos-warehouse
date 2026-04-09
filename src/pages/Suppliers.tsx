@@ -12,6 +12,7 @@ import type { SupplierFormValues, SupplierRow } from "@/features/suppliers/types
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 export default function Suppliers() {
   const { toast } = useToast();
@@ -139,22 +140,43 @@ export default function Suppliers() {
         <div>
           <h1 className="text-3xl font-bold text-white">Suppliers</h1>
           <p className="text-slate-300">
-            Manage suppliers, contacts, branch ownership, and opening balances.
+            Manage suppliers, contacts, branch ownership, opening balances, and supplier-level credit workflows.
           </p>
         </div>
 
-        <Button
-          className="font-semibold"
-          onClick={() => {
-            setEditingSupplier(null);
-            setDialogOpen(true);
-          }}
-        >
-          Add Supplier
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline" className="font-semibold">
+            <Link to="/suppliers/credit-notes">Credit Notes</Link>
+          </Button>
+
+          <Button
+            className="font-semibold"
+            onClick={() => {
+              setEditingSupplier(null);
+              setDialogOpen(true);
+            }}
+          >
+            Add Supplier
+          </Button>
+        </div>
       </div>
 
       <SupplierStatsCards stats={stats} />
+
+      <Card className="border-cyan-700/30 bg-slate-900 shadow-sm">
+        <CardContent className="flex flex-col gap-3 pt-6 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-medium text-white">Supplier Credit Notes</p>
+            <p className="text-sm text-slate-400">
+              Record non-cash supplier credits separately from payments and apply them safely to open purchases.
+            </p>
+          </div>
+
+          <Button asChild>
+            <Link to="/suppliers/credit-notes">Open Credit Notes</Link>
+          </Button>
+        </CardContent>
+      </Card>
 
       <Card className="border-slate-600 bg-slate-900 shadow-sm">
         <CardContent className="pt-6">

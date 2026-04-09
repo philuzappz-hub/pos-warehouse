@@ -88,6 +88,18 @@ export function getSupplierStatementSummary(
       .reduce((sum, e) => sum + safeNumber(e.credit), 0)
   );
 
+  const totalCreditNotesIssued = roundMoney(
+    entries
+      .filter((e) => e.entry_type === "credit_note_issued")
+      .reduce((sum, e) => sum + safeNumber(e.credit), 0)
+  );
+
+  const totalCreditNotesApplied = roundMoney(
+    entries
+      .filter((e) => e.entry_type === "credit_note_applied")
+      .reduce((sum, e) => sum + safeNumber(e.credit), 0)
+  );
+
   const rawClosingBalance =
     entries.length > 0
       ? roundMoney(safeNumber(entries[entries.length - 1].running_balance))
@@ -99,6 +111,8 @@ export function getSupplierStatementSummary(
     totalPayments,
     totalOverpaymentCredits,
     totalCreditsApplied,
+    totalCreditNotesIssued,
+    totalCreditNotesApplied,
     closingBalance: rawClosingBalance,
   };
 }

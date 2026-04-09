@@ -1,11 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -15,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import SupplierPaymentAllocationHistoryDialog from "@/features/suppliers/components/SupplierPaymentAllocationHistoryDialog";
 import SupplierPaymentStatementTable from "@/features/suppliers/components/SupplierPaymentStatementTable";
 import { money } from "@/features/suppliers/helpers";
 import {
@@ -24,11 +19,7 @@ import {
   shareReportViaWhatsApp,
 } from "@/features/suppliers/reportExport";
 import { fetchSuppliers } from "@/features/suppliers/services";
-import {
-  autoAllocateSupplierPayment,
-  fetchSupplierPaymentAllocations,
-  type SupplierPaymentAllocationRow,
-} from "@/features/suppliers/services_payment_allocations";
+import { autoAllocateSupplierPayment } from "@/features/suppliers/services_payment_allocations";
 import {
   fetchSupplierPaymentStatement,
   type SupplierPaymentStatementRow,
@@ -55,17 +46,6 @@ type CompanyMeta = {
 
 function todayString() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function formatDisplayDate(value?: string | null) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(date);
 }
 
 export default function SupplierPaymentStatement() {
@@ -106,8 +86,6 @@ export default function SupplierPaymentStatement() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyRow, setHistoryRow] = useState<SupplierPaymentStatementRow | null>(null);
-  const [historyRows, setHistoryRows] = useState<SupplierPaymentAllocationRow[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
 
   const supplierLabel = useMemo(() => {
     if (supplierId === "all") return "All Suppliers";
@@ -203,24 +181,9 @@ export default function SupplierPaymentStatement() {
     }
   }
 
-  async function handleViewHistory(row: SupplierPaymentStatementRow) {
-    setHistoryOpen(true);
+  function handleViewHistory(row: SupplierPaymentStatementRow) {
     setHistoryRow(row);
-    setHistoryLoading(true);
-
-    try {
-      const allocations = await fetchSupplierPaymentAllocations(row.id);
-      setHistoryRows(allocations);
-    } catch (e: any) {
-      setHistoryRows([]);
-      toast({
-        title: "History load failed",
-        description: e?.message || "Could not load allocation history.",
-        variant: "destructive",
-      });
-    } finally {
-      setHistoryLoading(false);
-    }
+    setHistoryOpen(true);
   }
 
   function handleExport() {
@@ -228,7 +191,10 @@ export default function SupplierPaymentStatement() {
       buildSummaryCardHtml("Total Payments", `GHS ${money(summary.totalPayments)}`),
       buildSummaryCardHtml("Cash Payments", `GHS ${money(summary.cashPayments)}`),
       buildSummaryCardHtml("MoMo Payments", `GHS ${money(summary.momoPayments)}`),
-      buildSummaryCardHtml("Bank Transfer Payments", `GHS ${money(summary.bankTransferPayments)}`),
+      buildSummaryCardHtml(
+        "Bank Transfer Payments",
+        `GHS ${money(summary.bankTransferPayments)}`
+      ),
       buildSummaryCardHtml("Card Payments", `GHS ${money(summary.cardPayments)}`),
       buildSummaryCardHtml("Allocated to Purchases", `GHS ${money(summary.linkedPayments)}`),
       buildSummaryCardHtml("Unallocated", `GHS ${money(summary.unallocatedPayments)}`),
@@ -309,9 +275,13 @@ export default function SupplierPaymentStatement() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight text-white">Supplier Payment Statement</h1>
+          <h1 className="text-3xl font-bold tracking-tight text-white">
+            Supplier Payment Statement
+          </h1>
           <p className="text-slate-300">
-            Payment-history report only. This page shows payment records and allocation visibility.
+            Payment-history report only. This page shows payment records and allocation
+            visibility. Use the allocation log to see exactly which purchases each payment
+            settled.
           </p>
         </div>
 
@@ -435,7 +405,13 @@ export default function SupplierPaymentStatement() {
           <CardContent className="pt-4 text-cyan-300">
             Methods Total
             <br />
-            GHS {money(summary.cashPayments + summary.momoPayments + summary.bankTransferPayments + summary.cardPayments)}
+            GHS{" "}
+            {money(
+              summary.cashPayments +
+                summary.momoPayments +
+                summary.bankTransferPayments +
+                summary.cardPayments
+            )}
           </CardContent>
         </Card>
       </div>
@@ -453,83 +429,30 @@ export default function SupplierPaymentStatement() {
         </CardContent>
       </Card>
 
-      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
-        <DialogContent className="max-w-4xl border-slate-700 bg-slate-950 text-white">
-          <DialogHeader>
-            <DialogTitle>Allocation Log</DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-4">
-            {historyRow ? (
-              <div className="grid gap-3 rounded-lg border border-slate-700 bg-slate-900 p-4 md:grid-cols-4">
-                <div>
-                  <p className="text-xs text-slate-400">Payment Amount</p>
-                  <p className="font-semibold text-emerald-300">GHS {money(historyRow.amount)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400">Allocated</p>
-                  <p className="font-semibold text-cyan-300">
-                    GHS {money(historyRow.allocated_amount)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400">Unallocated</p>
-                  <p className="font-semibold text-amber-300">
-                    GHS {money(historyRow.unallocated_amount)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400">Status</p>
-                  <p className="font-semibold text-white">{historyRow.allocation_status}</p>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="rounded-lg border border-slate-700 bg-slate-900 p-4">
-              {historyLoading ? (
-                <p className="text-slate-300">Loading allocation log...</p>
-              ) : historyRows.length === 0 ? (
-                <p className="text-slate-400">No allocation history found for this payment.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[900px] text-sm">
-                    <thead className="border-b border-slate-700 text-slate-300">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Purchase Date</th>
-                        <th className="px-3 py-2 text-left">Order ID</th>
-                        <th className="px-3 py-2 text-left">Reference</th>
-                        <th className="px-3 py-2 text-right">Purchase Total</th>
-                        <th className="px-3 py-2 text-right">Allocated</th>
-                        <th className="px-3 py-2 text-left">Notes</th>
-                        <th className="px-3 py-2 text-left">Created At</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {historyRows.map((row) => (
-                        <tr key={row.allocation_id} className="border-b border-slate-800">
-                          <td className="px-3 py-2 text-slate-200">{row.purchase_date}</td>
-                          <td className="px-3 py-2 text-white">{row.invoice_number || "-"}</td>
-                          <td className="px-3 py-2 text-slate-300">{row.reference_number || "-"}</td>
-                          <td className="px-3 py-2 text-right text-white">
-                            GHS {money(row.purchase_total_amount)}
-                          </td>
-                          <td className="px-3 py-2 text-right text-cyan-300">
-                            GHS {money(row.allocated_amount)}
-                          </td>
-                          <td className="px-3 py-2 text-slate-300">{row.notes || "-"}</td>
-                          <td className="px-3 py-2 text-slate-400">
-                            {formatDisplayDate(row.created_at)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <SupplierPaymentAllocationHistoryDialog
+        open={historyOpen}
+        onOpenChange={(open) => {
+          setHistoryOpen(open);
+          if (!open) {
+            setHistoryRow(null);
+          }
+        }}
+        paymentId={historyRow?.id || null}
+        paymentSummary={
+          historyRow
+            ? {
+                amount: historyRow.amount,
+                allocated_amount: historyRow.allocated_amount,
+                unallocated_amount: historyRow.unallocated_amount,
+                allocation_status: historyRow.allocation_status,
+                payment_date: historyRow.payment_date,
+                payment_method: historyRow.payment_method,
+                reference_number: historyRow.reference_number,
+                supplier_name: historyRow.supplier_name,
+              }
+            : null
+        }
+      />
     </div>
   );
 }

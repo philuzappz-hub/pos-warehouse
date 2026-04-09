@@ -28,6 +28,8 @@ function friendlyTypeLabel(type: string) {
   if (raw === "credit_applied") return "Credit Applied";
   if (raw === "overpayment_credit") return "Overpayment Credit";
   if (raw === "opening_balance") return "Opening Balance";
+  if (raw === "credit_note_issued") return "Credit Note Issued";
+  if (raw === "credit_note_applied") return "Credit Note Applied";
   return raw.replace(/_/g, " ");
 }
 
@@ -38,6 +40,8 @@ function typeClassName(type: string) {
   if (raw === "credit_applied") return "text-cyan-300";
   if (raw === "overpayment_credit") return "text-sky-300";
   if (raw === "opening_balance") return "text-violet-300";
+  if (raw === "credit_note_issued") return "text-fuchsia-300";
+  if (raw === "credit_note_applied") return "text-indigo-300";
   return "text-slate-200";
 }
 
@@ -119,13 +123,11 @@ export default function SupplierStatementTable({ entries }: Props) {
                 {row.credit > 0 ? `GHS ${money(row.credit)}` : "—"}
               </td>
 
-              {/* ✅ UPDATED RUNNING BALANCE */}
               <td className={`px-4 py-3 text-right font-semibold ${balanceColor}`}>
                 GHS {money(displayAmount)}
 
-                {/* ✅ SHOW STATUS ONLY ON LAST ROW */}
                 {index === lastIndex && (
-                  <div className="text-xs mt-1 opacity-80">
+                  <div className="mt-1 text-xs opacity-80">
                     {isZero && <span>Settled</span>}
                     {isCredit && <span>Supplier owes you (Credit)</span>}
                     {!isCredit && !isZero && <span>You owe supplier</span>}

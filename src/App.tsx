@@ -66,12 +66,14 @@ import ChangePassword from "./pages/ChangePassword";
 import PurchaseDetails from "./pages/PurchaseDetails";
 import PurchaseNew from "./pages/PurchaseNew";
 import Purchases from "./pages/Purchases";
+import SupplierCreditNotes from "./pages/SupplierCreditNotes";
 import SupplierPayments from "./pages/SupplierPayments";
 import SupplierPaymentStatement from "./pages/SupplierPaymentStatement";
 import Suppliers from "./pages/Suppliers";
 import SupplierStatement from "./pages/SupplierStatement";
 import SupplierStockStatement from "./pages/SupplierStockStatement";
 import SupplierSummary from "./pages/SupplierSummary";
+
 const queryClient = new QueryClient();
 
 function FullScreenLoading({ label = "Loading..." }: { label?: string }) {
@@ -400,23 +402,23 @@ function AppRoutes() {
         }
       />
 
-     <Route
-  path="/reports"
-  element={
-    <RoleProtectedRoute allowedRoles={["admin"]}>
-      <Reports />
-    </RoleProtectedRoute>
-  }
-/>
+      <Route
+        path="/reports"
+        element={
+          <RoleProtectedRoute allowedRoles={["admin"]}>
+            <Reports />
+          </RoleProtectedRoute>
+        }
+      />
 
-<Route
-  path="/reconciliation-history"
-  element={
-    <RoleProtectedRoute allowedRoles={["admin"]}>
-      <ReconciliationHistory />
-    </RoleProtectedRoute>
-  }
-/>
+      <Route
+        path="/reconciliation-history"
+        element={
+          <RoleProtectedRoute allowedRoles={["admin"]}>
+            <ReconciliationHistory />
+          </RoleProtectedRoute>
+        }
+      />
 
       <Route
         path="/expenses"
@@ -462,19 +464,99 @@ function AppRoutes() {
           </RoleProtectedRoute>
         }
       />
-<Route path="/suppliers" element={<Suppliers />} />
-<Route path="/purchases" element={<Purchases />} />
-<Route path="/purchases/new" element={<PurchaseNew />} />
-<Route path="/purchases/:purchaseId" element={<PurchaseDetails />} />
-<Route path="/suppliers/statement" element={<SupplierStatement />} />
-<Route path="/suppliers/payments" element={<SupplierPayments />} />
-<Route path="/suppliers/summary" element={<SupplierSummary />} />
-<Route path="/suppliers/payment-statement" element={<SupplierPaymentStatement />} />
-<Route path="/suppliers/stock-statement" element={<SupplierStockStatement />} />
-<Route path="*" element={<NotFound />} />
-      
+
+      <Route
+        path="/suppliers"
+        element={
+          <ProtectedRoute>
+            <Suppliers />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/suppliers/credit-notes"
+        element={
+          <ProtectedRoute>
+            <SupplierCreditNotes />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/purchases"
+        element={
+          <ProtectedRoute>
+            <Purchases />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/purchases/new"
+        element={
+          <ProtectedRoute>
+            <PurchaseNew />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/purchases/:purchaseId"
+        element={
+          <ProtectedRoute>
+            <PurchaseDetails />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/suppliers/statement"
+        element={
+          <ProtectedRoute>
+            <SupplierStatement />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/suppliers/payments"
+        element={
+          <ProtectedRoute>
+            <SupplierPayments />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/suppliers/summary"
+        element={
+          <ProtectedRoute>
+            <SupplierSummary />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/suppliers/payment-statement"
+        element={
+          <ProtectedRoute>
+            <SupplierPaymentStatement />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/suppliers/stock-statement"
+        element={
+          <ProtectedRoute>
+            <SupplierStockStatement />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route path="*" element={<NotFound />} />
     </Routes>
-    
   );
 }
 
